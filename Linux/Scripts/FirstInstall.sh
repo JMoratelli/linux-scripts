@@ -74,6 +74,24 @@ install_flatpak_apps() {
   done
 }
 
+install_acessos() {
+  echo "=== Acessos (JMoratelli/acessos) ==="
+  local api_url="https://api.github.com/repos/JMoratelli/acessos/releases/latest"
+  local asset_url
+  asset_url=$(curl -fsSL "$api_url" | grep -o '"browser_download_url": *"[^"]*\.flatpak"' | head -n1 | sed -E 's/.*"(https[^"]+)"/\1/')
+  if [ -z "$asset_url" ]; then
+    echo "  [aviso] nao encontrei o .flatpak mais recente, baixe manualmente em https://github.com/JMoratelli/acessos/releases"
+    return
+  fi
+  local tmpfile
+  tmpfile=$(mktemp --suffix=.flatpak)
+  echo "  baixando $asset_url"
+  curl -fsSL -o "$tmpfile" "$asset_url"
+  flatpak install -y --user "$tmpfile" || flatpak install -y "$tmpfile" || \
+    echo "  [aviso] falha ao instalar o bundle flatpak do Acessos"
+  rm -f "$tmpfile"
+}
+
 install_vscode_extensions() {
   echo "=== VS Code: instalando extensoes ==="
   if ! command -v code >/dev/null 2>&1; then
@@ -162,6 +180,7 @@ run_cachy() {
   echo "=== Flatpak ==="
   sudo pacman -S --needed --noconfirm flatpak
   install_flatpak_apps
+  install_acessos
 
   install_vscode_extensions
 }
@@ -246,6 +265,7 @@ run_fedora() {
   echo "=== Flatpak ==="
   sudo dnf install -y flatpak
   install_flatpak_apps
+  install_acessos
 
   install_vscode_extensions
 }
@@ -335,6 +355,7 @@ run_debian() {
   echo "=== Flatpak ==="
   sudo apt install -y flatpak
   install_flatpak_apps
+  install_acessos
 
   install_vscode_extensions
 }
