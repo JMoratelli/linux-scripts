@@ -30,11 +30,11 @@
 # Roda como usuario (a configuracao e do usuario); so a instalacao de pacotes
 # pede sudo.
 #
-# So faz sentido na maquina pessoal: em maquina corporativa nao instala nada.
+# Maquina pessoal (pasta pessoal/: o FirstInstall so roda na pessoal).
 #
 # Uso:
-#   ./leds.sh [--pessoal|--corporativo]   instala / atualiza
-#   ./leds.sh --remover                   desfaz tudo (mantem os pacotes)
+#   ./leds.sh              instala / atualiza
+#   ./leds.sh --remover    desfaz tudo (mantem os pacotes)
 
 set -uo pipefail
 
@@ -82,36 +82,14 @@ remover() {
   echo "Concluido (pacotes e o restante da configuracao do OpenRGB foram mantidos)."
 }
 
-# Perfil da maquina: "pessoal" instala o que e do computador de casa (RGB,
-# teclado, perifericos); "corporativo" pula essas partes. O FirstInstall.sh
-# pergunta uma vez e repassa --pessoal/--corporativo; rodando sozinho no
-# terminal, pergunta aqui; sem terminal, assume corporativo.
-PERFIL=""
 REMOVER=0
-for arg in "$@"; do
-  case "$arg" in
-    --pessoal)     PERFIL="pessoal" ;;
-    --corporativo) PERFIL="corporativo" ;;
-    --remover)     REMOVER=1 ;;
-  esac
-done
-if [ -z "$PERFIL" ] && [ "$REMOVER" -eq 0 ]; then
-  if [ -t 0 ]; then
-    read -rp "Maquina pessoal ou corporativa? [p/c]: " resp
-    case "$resp" in p|P|pessoal) PERFIL="pessoal" ;; *) PERFIL="corporativo" ;; esac
-  else
-    PERFIL="corporativo"
-  fi
-fi
+[ "${1:-}" = "--remover" ] && REMOVER=1
 
 if [ "$REMOVER" -eq 1 ]; then
   remover
   exit 0
 fi
-if [ "$PERFIL" != "pessoal" ]; then
-  echo "leds.sh: maquina corporativa, nada a instalar"
-  exit 0
-fi
+
 
 if [ ! -d "$SRC" ]; then
   echo "pasta $SRC nao encontrada (o script precisa da pasta leds/ ao lado)"

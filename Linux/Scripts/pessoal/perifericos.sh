@@ -31,12 +31,12 @@
 #          religar a luz. Sobe sozinha quando o cabo conecta e para quando
 #          desconecta; com o OpenRGB fechado o teclado volta ao efeito gravado.
 #
-# As secoes 2 e 4 (LEDs e teclado) so entram em maquina pessoal.
+# Maquina pessoal (pasta pessoal/: o FirstInstall so roda na pessoal).
 #
 # Uso:
 #   chmod +x perifericos.sh
-#   ./perifericos.sh [--pessoal|--corporativo]   instala / atualiza
-#   ./perifericos.sh --remover                   desfaz tudo
+#   ./perifericos.sh              instala / atualiza
+#   ./perifericos.sh --remover    desfaz tudo
 #
 # Na mao: logi-leds-off, redragon-led status|off|set ...
 
@@ -91,33 +91,13 @@ remover() {
   echo "Concluido."
 }
 
-# Perfil da maquina: "pessoal" instala o que e do computador de casa (RGB,
-# teclado, perifericos); "corporativo" pula essas partes. O FirstInstall.sh
-# pergunta uma vez e repassa --pessoal/--corporativo; rodando sozinho no
-# terminal, pergunta aqui; sem terminal, assume corporativo.
-PERFIL=""
 REMOVER=0
-for arg in "$@"; do
-  case "$arg" in
-    --pessoal)     PERFIL="pessoal" ;;
-    --corporativo) PERFIL="corporativo" ;;
-    --remover)     REMOVER=1 ;;
-  esac
-done
-if [ -z "$PERFIL" ] && [ "$REMOVER" -eq 0 ]; then
-  if [ -t 0 ]; then
-    read -rp "Maquina pessoal ou corporativa? [p/c]: " resp
-    case "$resp" in p|P|pessoal) PERFIL="pessoal" ;; *) PERFIL="corporativo" ;; esac
-  else
-    PERFIL="corporativo"
-  fi
-fi
+[ "${1:-}" = "--remover" ] && REMOVER=1
 
 if [ "$REMOVER" -eq 1 ]; then
   remover
   exit 0
 fi
-echo ">>> Perfil da maquina: $PERFIL"
 
 if [ ! -d "$SRC" ]; then
   echo "pasta $SRC nao encontrada (o script precisa da pasta perifericos/ ao lado)"
@@ -165,9 +145,8 @@ done
 reload_driver
 
 # ---------------------------------------------------------------------------
-# 2. LEDs Logitech apagados ao conectar (so maquina pessoal)
+# 2. LEDs Logitech apagados ao conectar
 # ---------------------------------------------------------------------------
-if [ "$PERFIL" = "pessoal" ]; then
 echo "=== [2] LEDs Logitech: ${LED_BIN} + udev + systemd ==="
 install -m755 "$SRC/logi-leds-off" "$LED_BIN"
 
@@ -186,10 +165,6 @@ SUBSYSTEM=="power_supply", KERNEL=="hidpp_battery_*", ACTION=="add|change", ENV{
 # ao desligar, grava o estado para a proxima transicao ser detectada
 SUBSYSTEM=="power_supply", KERNEL=="hidpp_battery_*", ACTION=="change", ENV{POWER_SUPPLY_ONLINE}=="0", RUN+="/usr/bin/systemctl --no-block start logi-leds-off@%k.service"
 EOF
-
-else
-  echo "=== [2] LEDs Logitech: pulado (maquina corporativa) ==="
-fi
 
 # ---------------------------------------------------------------------------
 # 3. Audio automatico: G733 ligado -> fone; desligado -> HDMI
@@ -212,9 +187,8 @@ EOF
 systemctl --global enable fone-audio-auto.service
 
 # ---------------------------------------------------------------------------
-# 4. Teclado Redragon K629 (cabo USB) (so maquina pessoal)
+# 4. Teclado Redragon K629 (cabo USB)
 # ---------------------------------------------------------------------------
-if [ "$PERFIL" = "pessoal" ]; then
 echo "=== [4] Teclado Redragon K629: udev + redragon-led + teclado-ponte ==="
 user_systemctl stop teclado-barras.service           # versao anterior (barras proprias)
 rm -f "$KB_OLD_UNIT" /usr/local/bin/teclado-barras "$KB_LIB/teclado-barras"
@@ -248,10 +222,6 @@ Restart=on-failure
 RestartSec=3
 EOF
 
-else
-  echo "=== [4] Teclado Redragon K629: pulado (maquina corporativa) ==="
-fi
-
 # ---------------------------------------------------------------------------
 # Aplicar
 # ---------------------------------------------------------------------------
@@ -261,9 +231,7 @@ udevadm control --reload
 udevadm trigger --subsystem-match=hidraw --action=add
 user_systemctl daemon-reload
 user_systemctl start fone-audio-auto.service
-if [ "$PERFIL" = "pessoal" ]; then
-  "$LED_BIN" || echo "  (nenhum dispositivo Logitech ligado agora; os LEDs serao apagados ao conectar)"
-fi
+"$LED_BIN" || echo "  (nenhum dispositivo Logitech ligado agora; os LEDs serao apagados ao conectar)"
 
 echo ""
 echo "======================================"

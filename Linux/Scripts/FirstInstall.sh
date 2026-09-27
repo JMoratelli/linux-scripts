@@ -2,10 +2,13 @@
 #
 # FirstInstall.sh
 #
-# Script de pos-instalacao pessoal. Instala o conjunto de aplicativos e
-# ferramentas de desenvolvimento normalmente usados, com foco principal em
-# CachyOS (Arch-based). Tambem oferece suporte (best-effort) a Fedora e
-# Debian/Ubuntu para quando a distro do dia mudar.
+# Script de pos-instalacao. Instala o conjunto de aplicativos e ferramentas
+# de desenvolvimento usados tanto na maquina pessoal quanto na corporativa,
+# com foco principal em CachyOS (Arch-based). Tambem oferece suporte
+# (best-effort) a Fedora e Debian/Ubuntu para quando a distro do dia mudar.
+#
+# No inicio pergunta a distro e se a maquina e pessoal ou corporativa. No fim
+# roda os scripts de comum/ e depois os de pessoal/ ou corporativo/.
 #
 # Uso:
 #   chmod +x FirstInstall.sh
@@ -42,10 +45,10 @@ echo "  1) Pessoal (instala tambem RGB, teclado e perifericos de casa)"
 echo "  2) Corporativa"
 read -rp "Escolha [1-2]: " PERFIL_CHOICE
 case "$PERFIL_CHOICE" in
-  1) PERFIL_FLAG="--pessoal" ;;
-  *) PERFIL_FLAG="--corporativo" ;;
+  1) PERFIL="pessoal" ;;
+  *) PERFIL="corporativo" ;;
 esac
-echo ">>> Perfil: ${PERFIL_FLAG#--}"
+echo ">>> Perfil: $PERFIL"
 echo ""
 
 FLATPAK_APPS=(
@@ -64,6 +67,7 @@ FLATPAK_APPS=(
 
 VSCODE_EXTENSIONS=(
   anthropic.claude-code
+  golang.go
   ms-python.debugpy
   ms-python.python
   ms-python.vscode-pylance
@@ -371,19 +375,75 @@ run_debian() {
 }
 
 # ---------------------------------------------------------------------------
-# Demais scripts da pasta (perifericos.sh etc.). Cada um e independente e
-# roda mesmo se o anterior falhar; recebem o perfil da maquina
-# (--pessoal/--corporativo) para nao perguntar de novo.
+# VS Code: configuracoes de usuario seguindo github.com/JMoratelli/VSCode
+# (extensions.md, git-settings.md, editor-performance.md). Mescla no
+# settings.json existente, sem apagar o que ja estiver la.
+# ---------------------------------------------------------------------------
+apply_vscode_settings() {
+  echo "=== VS Code: configuracoes (github.com/JMoratelli/VSCode) ==="
+  local settings="$HOME/.config/Code/User/settings.json"
+  mkdir -p "$(dirname "$settings")"
+  python3 - "$settings" <<'PY' || echo "  [aviso] falha ao gravar $settings"
+import json, os, re, sys
+path = sys.argv[1]
+wanted = {
+    "extensions.autoCheckUpdates": False,    # extensions.md
+    "extensions.autoUpdate": False,
+    "git.autofetch": False,                  # git-settings.md
+    "git.detectSubmodules": False,
+    "editor.minimap.enabled": False,         # editor-performance.md
+    "workbench.editor.enablePreview": True,
+}
+try:
+    text = open(path).read()
+    # settings.json aceita comentarios e virgula sobrando (jsonc)
+    text = re.sub(r"^\s*//.*$", "", text, flags=re.M)
+    text = re.sub(r",(\s*[}\]])", r"\1", text)
+    data = json.loads(text) if text.strip() else {}
+except FileNotFoundError:
+    data = {}
+data.update(wanted)
+tmp = path + ".tmp"
+with open(tmp, "w") as f:
+    json.dump(data, f, indent=4)
+os.replace(tmp, path)
+print(f"  {len(wanted)} ajustes aplicados em {path}")
+PY
+}
+
+# ---------------------------------------------------------------------------
+# GitHub CLI: login e git usando o gh como credencial
+# ---------------------------------------------------------------------------
+setup_github_cli() {
+  echo "=== GitHub CLI: login e credencial do git ==="
+  if ! command -v gh >/dev/null 2>&1; then
+    echo "  [aviso] gh nao instalado, pulando"
+    return
+  fi
+  if ! gh auth status >/dev/null 2>&1; then
+    gh auth login --hostname github.com --git-protocol https --web || \
+      echo "  [aviso] login no GitHub nao concluido; rode 'gh auth login' depois"
+  else
+    echo "  ja autenticado"
+  fi
+  gh auth status >/dev/null 2>&1 && gh auth setup-git
+}
+
+# ---------------------------------------------------------------------------
+# Scripts extras: comum/ sempre, depois pessoal/ ou corporativo/ conforme o
+# perfil. Cada um e independente e roda mesmo se o anterior falhar; stdin em
+# /dev/null para nenhum ficar esperando resposta.
 # ---------------------------------------------------------------------------
 run_extra_scripts() {
-  local dir self script
-  dir=$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)
-  self=$(basename "${BASH_SOURCE[0]}")
-  for script in "$dir"/*.sh; do
-    [ "$(basename "$script")" = "$self" ] && continue
-    echo ""
-    echo "=== Executando $(basename "$script") ==="
-    bash "$script" "$PERFIL_FLAG" < /dev/null || echo "  [aviso] $(basename "$script") terminou com erro"
+  local base sub script
+  base=$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)
+  for sub in comum "$PERFIL"; do
+    for script in "$base/$sub"/*.sh; do
+      [ -e "$script" ] || continue
+      echo ""
+      echo "=== Executando $sub/$(basename "$script") ==="
+      bash "$script" < /dev/null || echo "  [aviso] $sub/$(basename "$script") terminou com erro"
+    done
   done
 }
 
@@ -393,6 +453,8 @@ case "$DISTRO" in
   debian) run_debian ;;
 esac
 
+apply_vscode_settings
+setup_github_cli
 run_extra_scripts
 
 echo ""
