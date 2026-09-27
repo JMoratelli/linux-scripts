@@ -1,0 +1,158 @@
+#!/usr/bin/env python3
+"""Controle de LED do Redragon K629 Phantom Pro (modo cabeado, Sinowealth 258a:0049).
+
+Protocolo copiado byte a byte do software oficial (Redragon K629CGO-PRO-M V1.6.6),
+capturado com hidsniff.so. Só o bloco de configuração 0xB6 é gravado, sempre como
+leitura-modificação-escrita, do mesmo jeito que o software faz.
+
+NUNCA gravar o bloco 0xD4: ele fica junto do mapa de teclas e do firmware 8051.
+Drivers genéricos que gravaram essa área já brickaram teclados Redragon.
+
+Layout do bloco 0xB6 (offsets no buffer do report 0x06):
+    0..13   cabeçalho: 06 83 b6 00... na leitura, 06 03 b6 00... na escrita
+    14..15  marcador 5a a5
+    21      efeito ativo (0 = desligado, 1 = cor fixa, ...)
+    36+2e   opção de cor do efeito e
+    37+2e   (velocidade << 4) | brilho do efeito e, cada um 0..4
+    78..79  marcador 5a a5
+A escrita manda os primeiros 142 bytes da leitura, completados com zeros até 1032.
+
+Cor personalizada (opção de cor 0; a 7 é aleatória) vai no bloco 0xB8, sempre gravado
+antes do 0xB6, como faz o software: bytes 29..31 = R, G, B, e a partir do 34 a máscara
+de teclas. O bloco inteiro vem de b8-modelo.bin, capturado do software oficial.
+"""
+import argparse, fcntl, glob, os, sys
+
+VID, PID = 0x258A, 0x0049
+BLOCK = 0xB6
+REPORT_LEN = 1032
+COPY_LEN = 142
+MODE_OFF = 21
+PARAMS_OFF = 36
+N_EFFECTS = 21
+MAGIC = b"\x5a\xa5"
+B8_TEMPLATE = os.path.join(os.path.dirname(os.path.realpath(__file__)), "b8-modelo.bin")
+RGB_OFF = 29
+
+
+def ioc(direction, nr, size):
+    return (direction << 30) | (size << 16) | (ord("H") << 8) | nr
+
+
+def find_dev():
+    for path in sorted(glob.glob("/sys/class/hidraw/hidraw*")):
+        uevent = open(f"{path}/device/uevent").read()
+        if f"HID_ID=0003:{VID:08X}:{PID:08X}" not in uevent:
+            continue
+        desc = open(f"{path}/device/report_descriptor", "rb").read()
+        if b"\x85\x06" in desc and b"\x85\x05" in desc:  # tem os feature reports 5 e 6
+            return "/dev/" + os.path.basename(path)
+    sys.exit("teclado 258a:0049 não encontrado: ele precisa estar ligado pelo cabo USB")
+
+
+def set_feature(fd, data):
+    fcntl.ioctl(fd, ioc(3, 0x06, len(data)), bytearray(data))
+
+
+def get_feature(fd, report_id, size):
+    buf = bytearray(size)
+    buf[0] = report_id
+    n = fcntl.ioctl(fd, ioc(3, 0x07, size), buf, True)
+    return bytes(buf[:n])
+
+
+def read_block(fd):
+    set_feature(fd, bytes([0x05, 0x83, BLOCK, 0, 0, 0]))
+    data = get_feature(fd, 0x06, REPORT_LEN)
+    if data[:3] != bytes([0x06, 0x83, BLOCK]) or data[14:16] != MAGIC or data[78:80] != MAGIC:
+        sys.exit("resposta inesperada do teclado, abortando sem gravar:\n" + data[:96].hex(" "))
+    return data
+
+
+def write_block(fd, cur):
+    out = bytearray(REPORT_LEN)
+    out[:COPY_LEN] = cur[:COPY_LEN]
+    out[1] = 0x03
+    set_feature(fd, out)
+
+
+def write_color(fd, rgb):
+    out = bytearray(open(B8_TEMPLATE, "rb").read())
+    if len(out) != REPORT_LEN or out[:3] != bytes([0x06, 0x08, 0xB8]):
+        sys.exit(f"{B8_TEMPLATE} inválido")
+    out[RGB_OFF:RGB_OFF + 3] = bytes(rgb)
+    set_feature(fd, out)
+
+
+def parse_rgb(text):
+    text = text.lstrip("#")
+    if len(text) == 6 and "," not in text:
+        return tuple(bytes.fromhex(text))
+    parts = [int(x) for x in text.split(",")]
+    if len(parts) != 3 or not all(0 <= x <= 255 for x in parts):
+        raise argparse.ArgumentTypeError("use R,G,B (0-255) ou RRGGBB")
+    return tuple(parts)
+
+
+def status(data):
+    mode = data[MODE_OFF]
+    print(f"efeito ativo: {mode}")
+    for e in range(N_EFFECTS):
+        c, p = data[PARAMS_OFF + 2 * e], data[PARAMS_OFF + 2 * e + 1]
+        mark = " <" if e == mode else ""
+        if (c, p) == (0xFF, 0xFF):
+            print(f"  efeito {e:2d}: (sem parâmetros){mark}")
+        else:
+            print(f"  efeito {e:2d}: cor={c} velocidade={p >> 4} brilho={p & 0x0F}{mark}")
+
+
+def main():
+    ap = argparse.ArgumentParser(description=__doc__.split("\n")[0])
+    sub = ap.add_subparsers(dest="cmd", required=True)
+    sub.add_parser("status", help="mostra a configuração atual (só leitura)")
+    sub.add_parser("off", help="desliga os LEDs")
+    s = sub.add_parser("set", help="muda efeito/cor/velocidade/brilho")
+    s.add_argument("--efeito", type=int, help=f"1..{N_EFFECTS - 1} (padrão: o atual)")
+    s.add_argument("--cor", type=int, choices=(0, 7), help="0 = personalizada (--rgb), 7 = aleatória")
+    s.add_argument("--rgb", type=parse_rgb, help="cor personalizada: R,G,B ou RRGGBB (implica --cor 0)")
+    s.add_argument("--velocidade", type=int, choices=range(5))
+    s.add_argument("--brilho", type=int, choices=range(5))
+    args = ap.parse_args()
+
+    fd = os.open(find_dev(), os.O_RDWR)
+    try:
+        cur = bytearray(read_block(fd))
+        if args.cmd == "status":
+            status(cur)
+            return
+        if args.cmd == "off":
+            cur[MODE_OFF] = 0
+        else:
+            e = cur[MODE_OFF] if args.efeito is None else args.efeito
+            if not 1 <= e < N_EFFECTS:
+                sys.exit(f"efeito precisa estar entre 1 e {N_EFFECTS - 1}")
+            i = PARAMS_OFF + 2 * e
+            if (cur[i], cur[i + 1]) == (0xFF, 0xFF) and any(
+                v is not None for v in (args.cor, args.rgb, args.velocidade, args.brilho)
+            ):
+                sys.exit(f"o efeito {e} não aceita parâmetros")
+            cur[MODE_OFF] = e
+            if args.rgb is not None:
+                args.cor = 0
+                write_color(fd, args.rgb)
+            if args.cor is not None:
+                cur[i] = args.cor
+            p = cur[i + 1]
+            if args.velocidade is not None:
+                p = (args.velocidade << 4) | (p & 0x0F)
+            if args.brilho is not None:
+                p = (p & 0xF0) | args.brilho
+            cur[i + 1] = p
+        write_block(fd, cur)
+        status(read_block(fd))
+    finally:
+        os.close(fd)
+
+
+if __name__ == "__main__":
+    main()

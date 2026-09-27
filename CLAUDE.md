@@ -13,3 +13,10 @@
   - avisar e seguir em vez de abortar quando um passo falhar.
   Scripts auxiliares que não devem ser chamados pelo FirstInstall ficam fora
   dessa pasta ou sem a extensão `.sh`.
+- Arquivos de apoio de um script ficam numa subpasta com o mesmo nome, ao lado
+  dele (`perifericos.sh` → `perifericos/`, `leds.sh` → `leds/`). O FirstInstall
+  só roda os `*.sh` do nível de cima, nunca o que está nas subpastas; o script
+  acha a pasta pelo próprio caminho (`dirname "${BASH_SOURCE[0]}"`).
+- `perifericos.sh` roda como root (sudo sozinho); `leds.sh` roda como usuário
+  (configuração do OpenRGB e do PipeWire ficam no home) e só usa sudo para
+  instalar pacotes.

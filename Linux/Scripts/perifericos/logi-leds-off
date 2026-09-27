@@ -1,0 +1,140 @@
+#!/usr/bin/env python3
+"""Apaga todos os LEDs dos perifericos Logitech via HID++ 2.0 (feature 0x8070).
+
+  logi-leds-off              apaga em todos os dispositivos conhecidos
+  logi-leds-off --ps NOME    chamado pelo udev: apaga so no dispositivo da
+                             bateria NOME (ex. hidpp_battery_1), e so quando
+                             ele acabou de ficar online
+"""
+import glob
+import os
+import select
+import sys
+import time
+
+VID = 0x046D
+# product id USB -> indices de dispositivo HID++ a tentar
+TARGETS = {
+    0x0B1F: [0xFF],              # G733 (dongle proprio)
+    0xC539: [1, 2, 3, 4, 5, 6],  # receptor Lightspeed (G502 no slot 1)
+}
+SWID = 0x0E
+FEAT_LED = 0x8070
+EFFECT_OFF = 0x0000
+TIMEOUT = 1.0
+STATE_DIR = "/run/logi-leds-off"
+
+
+class HidppError(Exception):
+    pass
+
+
+def hid_pid(hid_dir):
+    with open(os.path.join(hid_dir, "uevent")) as f:
+        ids = dict(l.strip().split("=", 1) for l in f if "=" in l)
+    vid, pid = ids.get("HID_ID", "0:0:0").split(":")[1:]
+    return int(vid, 16), int(pid, 16)
+
+
+def hidraw_nodes(pid):
+    for dev in sorted(glob.glob("/sys/class/hidraw/hidraw*/device")):
+        if hid_pid(dev) == (VID, pid):
+            yield "/dev/" + dev.split("/")[4]
+
+
+def request(fd, devidx, feat_idx, func, params=b""):
+    msg = bytes([0x11, devidx, feat_idx, (func << 4) | SWID]) + params
+    os.write(fd, msg.ljust(20, b"\0"))
+    deadline = time.monotonic() + TIMEOUT
+    while (left := deadline - time.monotonic()) > 0:
+        if not select.select([fd], [], [], left)[0]:
+            break
+        r = os.read(fd, 64)
+        if len(r) < 4 or r[0] not in (0x10, 0x11) or r[1] != devidx:
+            continue
+        if r[2] == 0xFF and r[3] == feat_idx:          # erro HID++ 2.0
+            raise HidppError(f"erro 0x{r[5]:02x}")
+        if r[0] == 0x10 and r[2] == 0x8F:              # erro HID++ 1.0 (slot vazio)
+            raise HidppError("dispositivo nao responde")
+        if r[2] == feat_idx and r[3] == msg[3]:
+            return r[4:]
+    raise HidppError("timeout")
+
+
+def leds_off(fd, devidx):
+    idx = request(fd, devidx, 0x00, 0, FEAT_LED.to_bytes(2, "big"))[0]
+    if idx == 0:
+        raise HidppError("sem feature de LED")
+    zones = request(fd, devidx, idx, 0)[0]
+    request(fd, devidx, idx, 8, b"\x01")               # LED controlado pelo host
+    for zone in range(zones):
+        count = request(fd, devidx, idx, 1, bytes([zone, 0xFF, 0]))[3]
+        for eff in range(count):
+            info = request(fd, devidx, idx, 2, bytes([zone, eff, 0]))
+            if int.from_bytes(info[2:4], "big") == EFFECT_OFF:
+                request(fd, devidx, idx, 3, bytes([zone, eff]) + bytes(10))
+                break
+    return zones
+
+
+def apply(pids):
+    ok = False
+    for pid in pids:
+        for node in hidraw_nodes(pid):
+            try:
+                fd = os.open(node, os.O_RDWR)
+            except OSError:
+                continue
+            try:
+                for devidx in TARGETS[pid]:
+                    try:
+                        zones = leds_off(fd, devidx)
+                        print(f"{node} dev {devidx:#04x}: {zones} zona(s) apagada(s)")
+                        ok = True
+                    except (HidppError, OSError):
+                        pass
+            finally:
+                os.close(fd)
+    return ok
+
+
+def usb_pid_of(ps_name):
+    # sobe da bateria ate o dispositivo USB (dongle ou receptor)
+    path = os.path.realpath(f"/sys/class/power_supply/{ps_name}")
+    while path != "/":
+        f = os.path.join(path, "idProduct")
+        if os.path.exists(f):
+            return int(open(f).read(), 16)
+        path = os.path.dirname(path)
+    return None
+
+
+def from_udev(ps_name):
+    try:
+        online = open(f"/sys/class/power_supply/{ps_name}/online").read().strip()
+    except OSError:
+        return 0
+    os.makedirs(STATE_DIR, exist_ok=True)
+    state = os.path.join(STATE_DIR, ps_name)
+    prev = open(state).read().strip() if os.path.exists(state) else "0"
+    open(state, "w").write(online)
+    if online != "1" or prev == "1":
+        return 0                         # so age na transicao offline -> online
+    pid = usb_pid_of(ps_name)
+    if pid not in TARGETS:
+        return 0
+    for _ in range(5):                   # o dispositivo pode ainda estar acordando
+        time.sleep(1)
+        if apply([pid]):
+            return 0
+    return 1
+
+
+def main():
+    if len(sys.argv) == 3 and sys.argv[1] == "--ps":
+        return from_udev(sys.argv[2])
+    return 0 if apply(TARGETS) else 1
+
+
+if __name__ == "__main__":
+    sys.exit(main())

@@ -1,0 +1,72 @@
+#!/usr/bin/env python3
+"""fone-audio-auto: troca a saida de audio conforme o headset liga/desliga.
+
+O dongle do G733 fica sempre no USB, entao a saida dele nunca some; quem diz
+se o fone esta ligado e a bateria exposta pelo kernel (online=1/0, ver o
+modulo hidpp-g733 do perifericos.sh).
+
+  fone ligou    -> saida padrao = G733, streams tocando vao junto
+  fone desligou -> saida padrao = HDMI
+
+So age na mudanca de estado: trocar a saida na mao continua valendo.
+"""
+import glob
+import subprocess
+import time
+
+HEADSET_MODEL = "G733"
+HEADSET_SINK = "alsa_output.usb-Logitech_G733"   # prefixo do nome da saida
+FALLBACK_SINK = "hdmi"                           # trecho do nome da saida HDMI
+INTERVAL = 2
+
+
+def headset_online():
+    for ps in glob.glob("/sys/class/power_supply/hidpp_battery_*"):
+        try:
+            if HEADSET_MODEL in open(f"{ps}/model_name").read():
+                return open(f"{ps}/online").read().strip() == "1"
+        except OSError:
+            pass
+    return None                                   # fone/modulo nao encontrado
+
+
+def pactl(*args):
+    return subprocess.run(["pactl", *args], capture_output=True, text=True, timeout=5).stdout
+
+
+def find_sink(pattern, prefix=False):
+    for line in pactl("list", "short", "sinks").splitlines():
+        name = line.split("\t")[1]
+        if (name.startswith(pattern) if prefix else pattern in name):
+            return name
+    return None
+
+
+def switch_to(sink):
+    if not sink:
+        return
+    pactl("set-default-sink", sink)
+    for line in pactl("list", "short", "sink-inputs").splitlines():
+        pactl("move-sink-input", line.split("\t")[0], sink)
+    print(f"saida de audio -> {sink}", flush=True)
+
+
+def main():
+    last = headset_online()
+    while True:
+        time.sleep(INTERVAL)
+        try:
+            now = headset_online()
+            if now is None or now == last:
+                continue
+            last = now
+            if now:
+                switch_to(find_sink(HEADSET_SINK, prefix=True))
+            else:
+                switch_to(find_sink(FALLBACK_SINK))
+        except (OSError, subprocess.SubprocessError, IndexError) as e:
+            print(f"fone-audio-auto: {e}", flush=True)
+
+
+if __name__ == "__main__":
+    main()

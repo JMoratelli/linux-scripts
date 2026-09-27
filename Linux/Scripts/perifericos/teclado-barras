@@ -1,0 +1,182 @@
+#!/usr/bin/env python3
+"""teclado-barras: espectro de audio em barras no Redragon K629 (so no cabo).
+
+Le a entrada virtual "RGB Audio" do PipeWire (o que toca na saida padrao;
+sem ela, o monitor da saida padrao),
+calcula o espectro e manda um quadro de cor por tecla a ~30 fps pelo feature
+report 0x08 0x0a, o mesmo do "Modo de musica" do software oficial. Esse report
+e so exibicao ao vivo: nao grava nada na memoria do teclado.
+
+Quadro: 126 posicoes x RGB, coluna por coluna, 6 teclas por coluna
+(posicao = coluna*6 + linha, linha 0 = F1..F12, linha 5 = Ctrl/espaco).
+"""
+import fcntl
+import glob
+import os
+import subprocess
+import sys
+import time
+from colorsys import hsv_to_rgb
+
+import numpy as np
+
+VID, PID = 0x258A, 0x0049
+SOURCE = "rgb_audio"
+FPS = 30
+RATE = 48000
+FFT = 2048
+BARS = 15
+FMIN, FMAX = 45.0, 12000.0
+# cor por faixa: (barras, matiz) -> grave vermelho, medio verde, agudo ciano
+BANDS_HUE = [(range(0, 5), 0.0), (range(5, 10), 0.33), (range(10, 15), 0.5)]
+SILENCE = 2e-4
+
+# (posicao no quadro, x do centro da tecla) do layout 75% do K629,
+# tirado do Cfg.ini do software oficial
+KEYS = [
+    (0, 26), (1, 25), (2, 35), (3, 41), (4, 30), (5, 30), (6, 65), (7, 64), (8, 84), (9, 94),
+    (10, 113), (11, 78), (12, 103), (13, 104), (14, 123), (15, 133), (16, 152), (17, 127),
+    (18, 142), (19, 142), (20, 161), (21, 172), (22, 190), (24, 181), (25, 181), (26, 200),
+    (27, 210), (28, 229), (30, 220), (31, 220), (32, 238), (33, 248), (34, 267), (35, 272),
+    (36, 258), (37, 258), (38, 277), (39, 286), (40, 306), (42, 297), (43, 297), (44, 316),
+    (45, 326), (46, 345), (48, 335), (49, 335), (50, 355), (51, 365), (52, 384), (53, 412),
+    (54, 374), (55, 374), (56, 393), (57, 403), (58, 422), (59, 451), (60, 413), (61, 413),
+    (62, 432), (63, 441), (64, 461), (65, 490), (66, 451), (67, 451), (68, 471), (69, 480),
+    (72, 489), (73, 490), (74, 509), (75, 519), (76, 74), (78, 528), (79, 547), (81, 546),
+    (82, 514), (83, 528), (84, 567), (88, 567), (89, 567), (90, 606), (91, 605), (92, 605),
+    (93, 606), (94, 605), (95, 606),
+]
+
+
+def ioc(direction, nr, size):
+    return (direction << 30) | (size << 16) | (ord("H") << 8) | nr
+
+
+def find_dev():
+    if os.path.exists("/dev/redragon-k629"):
+        return "/dev/redragon-k629"
+    for path in sorted(glob.glob("/sys/class/hidraw/hidraw*")):
+        try:
+            uevent = open(f"{path}/device/uevent").read()
+            desc = open(f"{path}/device/report_descriptor", "rb").read()
+        except OSError:
+            continue
+        if f"HID_ID=0003:{VID:08X}:{PID:08X}" in uevent and b"\x85\x08" in desc:
+            return "/dev/" + os.path.basename(path)
+    return None
+
+
+class Keyboard:
+    def __init__(self, dev):
+        self.fd = os.open(dev, os.O_RDWR)
+        self.req = ioc(3, 0x06, 382)             # HIDIOCSFEATURE(382)
+
+    def send(self, pixels):
+        frame = bytearray(b"\x08\x0a\x7a\x01") + pixels.tobytes()
+        fcntl.ioctl(self.fd, self.req, frame)
+
+
+class Spectrum:
+    def __init__(self):
+        self.window = np.hanning(FFT).astype(np.float32)
+        freqs = np.fft.rfftfreq(FFT, 1 / RATE)
+        edges = np.geomspace(FMIN, FMAX, BARS + 1)
+        self.bins = []
+        for lo, hi in zip(edges[:-1], edges[1:]):
+            idx = np.where((freqs >= lo) & (freqs < hi))[0]
+            if len(idx) == 0:
+                idx = np.array([np.argmin(abs(freqs - (lo + hi) / 2))])
+            self.bins.append(idx)
+        self.peak = np.full(BARS, 0.5)
+        self.level = np.zeros(BARS)
+
+    def __call__(self, x):
+        mag = np.abs(np.fft.rfft(x * self.window))
+        v = np.log1p(np.array([mag[b].mean() for b in self.bins]) * 6.0)
+        self.peak = np.maximum(np.maximum(v, self.peak * 0.997), 0.5)   # ganho automatico
+        target = np.clip(v / self.peak, 0, 1) ** 2.2
+        rise = target > self.level
+        self.level = np.where(rise, target, self.level - 0.06)          # sobe rapido, desce suave
+        self.level = np.clip(self.level, 0, 1)
+        return self.level
+
+
+class Layout:
+    """Agrupa as teclas em BARS colunas pela posicao fisica."""
+
+    def __init__(self):
+        xs = np.array([x for _, x in KEYS], float)
+        edges = np.linspace(xs.min() - 1, xs.max() + 1, BARS + 1)
+        self.keys = []                            # (posicao, barra, altura 1..6)
+        for pos, x in KEYS:
+            bar = min(BARS - 1, int(np.searchsorted(edges, x) - 1))
+            row = pos % 6
+            self.keys.append((pos, bar, 6 - row))
+        self.hues = [next(h for bars, h in BANDS_HUE if b in bars) for b in range(BARS)]
+
+    def render(self, level, fade):
+        px = np.zeros((126, 3), np.uint8)
+        heights = level * 6
+        for pos, bar, h in self.keys:
+            fill = heights[bar] - (h - 1)         # quanto desta tecla esta "cheio"
+            if fill <= 0:
+                continue
+            v = min(1.0, fill) * fade
+            top = heights[bar] < h                # tecla do topo da barra, mais clara
+            r, g, b = hsv_to_rgb(self.hues[bar], 0.75 if top else 1.0, v)
+            px[pos] = (int(r * 255), int(g * 255), int(b * 255))
+        return px
+
+
+def audio_source():
+    """A "RGB Audio" do leds.sh; sem ela, o monitor da saida padrao."""
+    try:
+        out = subprocess.run(["pactl", "list", "short", "sources"], capture_output=True,
+                             text=True, timeout=5).stdout
+    except (OSError, subprocess.SubprocessError):
+        out = ""
+    return SOURCE if any(l.split("\t")[1:2] == [SOURCE] for l in out.splitlines()) else "@DEFAULT_MONITOR@"
+
+
+def audio_stream():
+    return subprocess.Popen(
+        ["parec", "-d", audio_source(), "--raw", "--format=float32le", "--channels=1",
+         f"--rate={RATE}", "--latency-msec=15", "--client-name=teclado-barras"],
+        stdout=subprocess.PIPE, stderr=subprocess.DEVNULL)
+
+
+def main():
+    dev = find_dev()
+    if not dev:
+        sys.exit("teclado 258a:0049 nao encontrado (precisa estar no cabo USB)")
+    kb = Keyboard(dev)
+    spec, layout = Spectrum(), Layout()
+    proc = audio_stream()
+    os.set_blocking(proc.stdout.fileno(), False)
+    buf = np.zeros(FFT, np.float32)
+    period, silent, fade = 1.0 / FPS, 0.0, 0.0
+    while True:
+        start = time.monotonic()
+        data = proc.stdout.read()
+        if data:
+            s = np.frombuffer(data[:len(data) // 4 * 4], np.float32)
+            buf = np.concatenate((buf, s))[-FFT:]
+        elif proc.poll() is not None:             # PipeWire reiniciou: reabre
+            time.sleep(1)
+            proc = audio_stream()
+            os.set_blocking(proc.stdout.fileno(), False)
+        rms = float(np.sqrt(np.mean(buf[-FFT // 2:] ** 2)))
+        silent = silent + period if rms < SILENCE else 0.0
+        fade = max(0.0, fade - 0.05) if silent > 2 else min(1.0, fade + 0.2)
+        try:
+            kb.send(layout.render(spec(buf), fade))
+        except OSError as e:                      # teclado desconectado
+            sys.exit(f"teclado desconectado: {e}")
+        time.sleep(max(0.0, period - (time.monotonic() - start)))
+
+
+if __name__ == "__main__":
+    try:
+        main()
+    except KeyboardInterrupt:
+        pass
