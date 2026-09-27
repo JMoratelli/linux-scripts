@@ -23,14 +23,20 @@
 #          link fixo /dev/redragon-k629 na interface de controle
 #        - redragon-led: cor/efeito gravados no teclado (blocos 0xB6/0xB8;
 #          NUNCA o 0xD4, que tem o keymap e o firmware)
-#        - teclado-barras: espectro de audio em barras, cor por tecla ao vivo
-#          (report 0x08, nao grava nada no teclado); sobe sozinho quando o
-#          cabo conecta e para quando desconecta
+#        - teclado-ponte: poe o teclado dentro do OpenRGB. O OpenRGB o enxerga
+#          como um dispositivo DDP em 127.0.0.1:4049 (matriz 21x6, ver leds.sh)
+#          e a ponte repassa a cor de cada tecla ao vivo (report 0x08, como o
+#          "Modo de musica" do software oficial). Entra e sai do streaming
+#          regravando o 0xB6, como o software; sem isso o Fn+espaco deixa de
+#          religar a luz. Sobe sozinha quando o cabo conecta e para quando
+#          desconecta; com o OpenRGB fechado o teclado volta ao efeito gravado.
+#
+# As secoes 2 e 4 (LEDs e teclado) so entram em maquina pessoal.
 #
 # Uso:
 #   chmod +x perifericos.sh
-#   ./perifericos.sh              instala / atualiza
-#   ./perifericos.sh --remover    desfaz tudo
+#   ./perifericos.sh [--pessoal|--corporativo]   instala / atualiza
+#   ./perifericos.sh --remover                   desfaz tudo
 #
 # Na mao: logi-leds-off, redragon-led status|off|set ...
 
@@ -53,7 +59,8 @@ AUDIO_BIN="/usr/local/bin/fone-audio-auto"
 AUDIO_UNIT="/etc/systemd/user/fone-audio-auto.service"
 KB_LIB="/usr/local/lib/redragon"
 KB_RULE="/etc/udev/rules.d/60-redragon-k629.rules"
-KB_UNIT="/etc/systemd/user/teclado-barras.service"
+KB_UNIT="/etc/systemd/user/teclado-ponte.service"
+KB_OLD_UNIT="/etc/systemd/user/teclado-barras.service"   # versao anterior
 
 user_systemctl() {
   # servicos de usuario na sessao de quem chamou o sudo (se houver)
@@ -70,12 +77,12 @@ reload_driver() {
 remover() {
   echo "=== Removendo integracao dos perifericos ==="
   user_systemctl disable --now fone-audio-auto.service
-  user_systemctl stop teclado-barras.service
+  user_systemctl stop teclado-ponte.service teclado-barras.service
   systemctl --global disable fone-audio-auto.service 2>/dev/null
   dkms remove -m "$DKMS_NAME" -v "$DKMS_VER" --all 2>/dev/null || true
   rm -rf "$DKMS_SRC" "$KB_LIB" /run/logi-leds-off
   rm -f "$LED_BIN" "$LED_RULE" "$LED_UNIT" "$AUDIO_BIN" "$AUDIO_UNIT" \
-        "$KB_RULE" "$KB_UNIT" /usr/local/bin/redragon-led /usr/local/bin/teclado-barras
+        "$KB_RULE" "$KB_UNIT" "$KB_OLD_UNIT" /usr/local/bin/redragon-led /usr/local/bin/teclado-barras
   systemctl daemon-reload
   user_systemctl daemon-reload
   udevadm control --reload
@@ -84,10 +91,33 @@ remover() {
   echo "Concluido."
 }
 
-if [ "${1:-}" = "--remover" ]; then
+# Perfil da maquina: "pessoal" instala o que e do computador de casa (RGB,
+# teclado, perifericos); "corporativo" pula essas partes. O FirstInstall.sh
+# pergunta uma vez e repassa --pessoal/--corporativo; rodando sozinho no
+# terminal, pergunta aqui; sem terminal, assume corporativo.
+PERFIL=""
+REMOVER=0
+for arg in "$@"; do
+  case "$arg" in
+    --pessoal)     PERFIL="pessoal" ;;
+    --corporativo) PERFIL="corporativo" ;;
+    --remover)     REMOVER=1 ;;
+  esac
+done
+if [ -z "$PERFIL" ] && [ "$REMOVER" -eq 0 ]; then
+  if [ -t 0 ]; then
+    read -rp "Maquina pessoal ou corporativa? [p/c]: " resp
+    case "$resp" in p|P|pessoal) PERFIL="pessoal" ;; *) PERFIL="corporativo" ;; esac
+  else
+    PERFIL="corporativo"
+  fi
+fi
+
+if [ "$REMOVER" -eq 1 ]; then
   remover
   exit 0
 fi
+echo ">>> Perfil da maquina: $PERFIL"
 
 if [ ! -d "$SRC" ]; then
   echo "pasta $SRC nao encontrada (o script precisa da pasta perifericos/ ao lado)"
@@ -135,8 +165,9 @@ done
 reload_driver
 
 # ---------------------------------------------------------------------------
-# 2. LEDs Logitech apagados ao conectar
+# 2. LEDs Logitech apagados ao conectar (so maquina pessoal)
 # ---------------------------------------------------------------------------
+if [ "$PERFIL" = "pessoal" ]; then
 echo "=== [2] LEDs Logitech: ${LED_BIN} + udev + systemd ==="
 install -m755 "$SRC/logi-leds-off" "$LED_BIN"
 
@@ -155,6 +186,10 @@ SUBSYSTEM=="power_supply", KERNEL=="hidpp_battery_*", ACTION=="add|change", ENV{
 # ao desligar, grava o estado para a proxima transicao ser detectada
 SUBSYSTEM=="power_supply", KERNEL=="hidpp_battery_*", ACTION=="change", ENV{POWER_SUPPLY_ONLINE}=="0", RUN+="/usr/bin/systemctl --no-block start logi-leds-off@%k.service"
 EOF
+
+else
+  echo "=== [2] LEDs Logitech: pulado (maquina corporativa) ==="
+fi
 
 # ---------------------------------------------------------------------------
 # 3. Audio automatico: G733 ligado -> fone; desligado -> HDMI
@@ -177,14 +212,16 @@ EOF
 systemctl --global enable fone-audio-auto.service
 
 # ---------------------------------------------------------------------------
-# 4. Teclado Redragon K629 (cabo USB)
+# 4. Teclado Redragon K629 (cabo USB) (so maquina pessoal)
 # ---------------------------------------------------------------------------
-echo "=== [4] Teclado Redragon K629: udev + redragon-led + teclado-barras ==="
+if [ "$PERFIL" = "pessoal" ]; then
+echo "=== [4] Teclado Redragon K629: udev + redragon-led + teclado-ponte ==="
+user_systemctl stop teclado-barras.service           # versao anterior (barras proprias)
+rm -f "$KB_OLD_UNIT" /usr/local/bin/teclado-barras "$KB_LIB/teclado-barras"
 mkdir -p "$KB_LIB"
-install -m755 "$SRC/redragon-led" "$SRC/teclado-barras" "$KB_LIB/"
+install -m755 "$SRC/redragon-led" "$SRC/teclado-ponte" "$KB_LIB/"
 install -m644 "$SRC/b8-modelo.bin" "$KB_LIB/"
 ln -sf "$KB_LIB/redragon-led" /usr/local/bin/redragon-led
-ln -sf "$KB_LIB/teclado-barras" /usr/local/bin/teclado-barras
 
 rm -f /etc/udev/rules.d/60-redragon-compx.rules       # nome antigo desta regra
 cat > "$KB_RULE" <<'EOF'
@@ -192,24 +229,28 @@ cat > "$KB_RULE" <<'EOF'
 # acesso pelo usuario logado: dongle sem fio (Compx 25a7:fa70) e cabo USB (Sinowealth 258a:0049)
 SUBSYSTEMS=="usb|hidraw", ATTRS{idVendor}=="25a7", ATTRS{idProduct}=="fa70", TAG+="uaccess"
 SUBSYSTEMS=="usb|hidraw", ATTRS{idVendor}=="258a", ATTRS{idProduct}=="0049", TAG+="uaccess"
-# interface de controle no cabo (feature reports 5, 6 e 8): link fixo e barras de audio.
+# interface de controle no cabo (feature reports 5, 6 e 8): link fixo e ponte com o OpenRGB.
 # Em duas regras porque os ATTRS de uma mesma regra precisam casar no mesmo pai
 # (idVendor fica no dispositivo USB, bInterfaceNumber na interface).
 SUBSYSTEM=="hidraw", ATTRS{idVendor}=="258a", ATTRS{idProduct}=="0049", ENV{REDRAGON_K629}="1"
-SUBSYSTEM=="hidraw", ENV{REDRAGON_K629}=="1", ATTRS{bInterfaceNumber}=="01", SYMLINK+="redragon-k629", TAG+="systemd", ENV{SYSTEMD_USER_WANTS}+="teclado-barras.service"
+SUBSYSTEM=="hidraw", ENV{REDRAGON_K629}=="1", ATTRS{bInterfaceNumber}=="01", SYMLINK+="redragon-k629", TAG+="systemd", ENV{SYSTEMD_USER_WANTS}+="teclado-ponte.service"
 EOF
 
 cat > "$KB_UNIT" <<EOF
 [Unit]
-Description=Barras de audio no teclado Redragon K629 (cabo USB)
+Description=Ponte OpenRGB -> teclado Redragon K629 (cabo USB)
 BindsTo=dev-redragon\\x2dk629.device
-After=dev-redragon\\x2dk629.device pipewire-pulse.service
+After=dev-redragon\\x2dk629.device
 
 [Service]
-ExecStart=${KB_LIB}/teclado-barras
+ExecStart=${KB_LIB}/teclado-ponte
 Restart=on-failure
 RestartSec=3
 EOF
+
+else
+  echo "=== [4] Teclado Redragon K629: pulado (maquina corporativa) ==="
+fi
 
 # ---------------------------------------------------------------------------
 # Aplicar
@@ -220,7 +261,9 @@ udevadm control --reload
 udevadm trigger --subsystem-match=hidraw --action=add
 user_systemctl daemon-reload
 user_systemctl start fone-audio-auto.service
-"$LED_BIN" || echo "  (nenhum dispositivo Logitech ligado agora; os LEDs serao apagados ao conectar)"
+if [ "$PERFIL" = "pessoal" ]; then
+  "$LED_BIN" || echo "  (nenhum dispositivo Logitech ligado agora; os LEDs serao apagados ao conectar)"
+fi
 
 echo ""
 echo "======================================"
@@ -228,6 +271,6 @@ echo " Concluido."
 echo " Bateria do G733/G502: applet de bateria do KDE (upower)."
 echo " LEDs Logitech: apagados automaticamente sempre que o dispositivo conectar."
 echo " Audio: G733 ligado -> fone; desligado -> HDMI."
-echo " Teclado K629: barras de audio sempre que estiver no cabo USB."
+echo " Teclado K629: no OpenRGB (via teclado-ponte) sempre que estiver no cabo USB."
 echo " Para desfazer: ./perifericos.sh --remover"
 echo "======================================"

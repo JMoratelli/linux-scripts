@@ -37,6 +37,16 @@ esac
 echo ""
 echo ">>> Distro selecionada: $DISTRO"
 echo ""
+echo "Esta maquina e:"
+echo "  1) Pessoal (instala tambem RGB, teclado e perifericos de casa)"
+echo "  2) Corporativa"
+read -rp "Escolha [1-2]: " PERFIL_CHOICE
+case "$PERFIL_CHOICE" in
+  1) PERFIL_FLAG="--pessoal" ;;
+  *) PERFIL_FLAG="--corporativo" ;;
+esac
+echo ">>> Perfil: ${PERFIL_FLAG#--}"
+echo ""
 
 FLATPAK_APPS=(
   de.gonicus.gonnect
@@ -362,7 +372,8 @@ run_debian() {
 
 # ---------------------------------------------------------------------------
 # Demais scripts da pasta (perifericos.sh etc.). Cada um e independente e
-# roda mesmo se o anterior falhar.
+# roda mesmo se o anterior falhar; recebem o perfil da maquina
+# (--pessoal/--corporativo) para nao perguntar de novo.
 # ---------------------------------------------------------------------------
 run_extra_scripts() {
   local dir self script
@@ -372,7 +383,7 @@ run_extra_scripts() {
     [ "$(basename "$script")" = "$self" ] && continue
     echo ""
     echo "=== Executando $(basename "$script") ==="
-    bash "$script" || echo "  [aviso] $(basename "$script") terminou com erro"
+    bash "$script" "$PERFIL_FLAG" < /dev/null || echo "  [aviso] $(basename "$script") terminou com erro"
   done
 }
 

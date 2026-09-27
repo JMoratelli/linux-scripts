@@ -3,8 +3,10 @@
 
 Escreve em ~/.config/OpenRGB:
   - OpenRGB.json         detectores ignorados + perfil carregado na abertura
-  - Configuration.json   tamanho e nome das zonas ARGB (se ja existir)
+  - Configuration.json   tamanho e nome das zonas ARGB (se ja existir) e o
+                         teclado K629 como matriz 21x6
   - profiles/Gabinete.json  efeitos de audio por zona (Effects Plugin)
+  - profiles/Dota.json      sem efeitos (o dota-rgb pinta pelo SDK)
 e ~/.config/rgb-gabinete/zonas.json, conferido pelo openrgb-gabinete.
 """
 import json
@@ -12,6 +14,7 @@ import os
 
 CFG = os.path.expanduser("~/.config/OpenRGB")
 PROFILE = "Gabinete"
+PROFILE_DOTA = "Dota"       # sem efeitos: quem pinta e o dota-rgb, pelo SDK
 PLUGIN = "OpenRGB Effects Plugin"
 
 # Detectores desligados: Logitech (G502/G733 ficam sempre apagados, ver perifericos.sh)
@@ -38,7 +41,22 @@ WLED = {
     "name": "WLED Mesa", "vendor": "", "description": "Distributed Display Protocol Device",
     "version": "", "serial": "", "location": "DDP: 192.168.3.84:4048",
 }
-DDP_DEVICES = [{"name": "WLED Mesa", "ip": "192.168.3.84", "port": 4048, "num_leds": 66}]
+KEYBOARD = {
+    "name": "Redragon K629", "vendor": "", "description": "Distributed Display Protocol Device",
+    "version": "", "serial": "", "location": "DDP: 127.0.0.1:4049",
+}
+DDP_DEVICES = [
+    {"name": "WLED Mesa", "ip": "192.168.3.84", "port": 4048, "num_leds": 66},
+    # teclado Redragon K629 via teclado-ponte (perifericos.sh): o quadro inteiro
+    # do teclado, 21 colunas x 6 linhas, posicao = coluna*6 + linha
+    {"name": "Redragon K629", "ip": "127.0.0.1", "port": 4049, "num_leds": 126},
+]
+# posicoes do quadro que tem tecla (layout 75%, tirado do Cfg.ini do software oficial)
+K629_KEYS = [0, 1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15, 16, 17, 18, 19, 20, 21, 22,
+    24, 25, 26, 27, 28, 30, 31, 32, 33, 34, 35, 36, 37, 38, 39, 40, 42, 43, 44, 45, 46, 48, 49,
+    50, 51, 52, 53, 54, 55, 56, 57, 58, 59, 60, 61, 62, 63, 64, 65, 66, 67, 68, 69, 72, 73, 74,
+    75, 76, 78, 79, 81, 82, 83, 84, 88, 89, 90, 91, 92, 93, 94, 95]
+K629_COLS, K629_ROWS = 21, 6
 MOBO = {
     "name": "X570 GAMING X", "vendor": "Gigabyte", "description": "IT8297BX-GBX570",
     "version": "1.0.6.0", "serial": "0x82970100", "location": "HID: /dev/hidraw0",
@@ -102,6 +120,11 @@ EFFECTS = [
     ("WLED Mesa - audio", "AudioStar", [(WLED, 0)], {
         "edge_beat": True, "edge_beat_sensivity": 100, "edge_beat_saturation": 0, "edge_beat_hue": 300,
         "audio_settings": audio()}, 100),
+    ("Teclado - barras", "AudioVisualizer", [(KEYBOARD, 0)], {
+        "ForegroundMode": 18, "BackgroundMode": 0, "BackgroundBrightness": 0,   # arco-iris / preto
+        "SingleColorMode": 12, "AnimationSpeed": 100.0, "ReactiveBackground": False,
+        "SilentBackground": False, "BackgroundTimeout": 120.0,
+        "audio_settings": audio(amplitude=250)}, 100),
     ("Fonte, GPU e placa-mae", "AudioSync",
      [(RAZER, 0)] + [(GPU, z) for z in range(5)] + [(MOBO, 2), (MOBO, 3)], {
          "fade_step": 10, "hue_shift": 0, "bypass_min": 0, "bypass_max": 255,
@@ -161,9 +184,27 @@ def configuration_json():
             # instalacao nova: o openrgb-gabinete ajusta o tamanho pelo SDK na
             # primeira abertura; os nomes entram quando este script rodar de novo
             pass
-    if ctrls:
-        d["controllers"] = ctrls
-        save(path, d)
+    ctrls = [c for c in ctrls if c.get("name") != KEYBOARD["name"]]
+    ctrls.append(keyboard_controller())
+    d["controllers"] = ctrls
+    save(path, d)
+
+
+def keyboard_controller():
+    """Teclado como matriz 21x6: o OpenRGB cria o DDP como fita linear, e o
+    tipo/mapa da zona sao configuraveis (flags MANUALLY_CONFIGURED_*)."""
+    present = set(K629_KEYS)
+    none = 0xFFFFFFFF
+    matrix = [(c * K629_ROWS + r) if (c * K629_ROWS + r) in present else none
+              for r in range(K629_ROWS) for c in range(K629_COLS)]
+    configurable = (1 << 2) | (1 << 3) | (1 << 4) | (1 << 5)   # nome, tipo, matriz, segmentos
+    configured = (1 << 14) | (1 << 15)                         # tipo e matriz configurados
+    return dict(KEYBOARD, type=4, flags=1, configuration=None, zones=[{
+        "name": KEYBOARD["name"], "display_name": "", "type": 2,   # ZONE_TYPE_MATRIX
+        "leds_count": 126, "leds_min": 126, "leds_max": 126,
+        "matrix_map": {"height": K629_ROWS, "width": K629_COLS, "map": matrix},
+        "flags": configurable | configured,
+    }])
 
 
 def zones_json():
@@ -204,9 +245,19 @@ def profile_json():
     save(path, profile)
 
 
+def dota_profile_json():
+    save(os.path.join(CFG, "profiles", PROFILE_DOTA + ".json"), {
+        "profile_name": PROFILE_DOTA,
+        "profile_version": 6,
+        "controllers": [],
+        "plugins": {PLUGIN: {"version": 2, "Effects": []}},
+    })
+
+
 if __name__ == "__main__":
     openrgb_json()
     configuration_json()
     zones_json()
     profile_json()
+    dota_profile_json()
     print("configuracao do OpenRGB gerada")

@@ -16,16 +16,25 @@
 #     corrigindo antes o indice da "RGB Audio" no perfil e, depois, o
 #     tamanho das zonas ARGB pelo SDK (fitas nao informam quantos LEDs tem)
 #   - autostart do KDE para o openrgb-gabinete
+#   - dota-rgb (servico de usuario): ao abrir o Dota 2 troca para o perfil
+#     "Dota" e pinta teclado e gabinete com o estado da partida (Game State
+#     Integration: habilidades/itens no teclado, vida/mana nos fans, cor do
+#     time); ao fechar volta para o "Gabinete". dota-setup.py grava o arquivo
+#     do GSI na pasta do Dota e a opcao -gamestateintegration no Steam.
+#   - rgbsdk.py: cliente do SDK do OpenRGB usado pelos dois
 #
 # Os Logitech (G502/G733) ficam de fora do OpenRGB: os LEDs deles ficam sempre
-# apagados pelo perifericos.sh. O teclado Redragon tambem e do perifericos.sh.
+# apagados pelo perifericos.sh. O teclado Redragon entra no OpenRGB como um
+# dispositivo DDP (matriz 21x6) atraves da teclado-ponte do perifericos.sh.
 #
 # Roda como usuario (a configuracao e do usuario); so a instalacao de pacotes
 # pede sudo.
 #
+# So faz sentido na maquina pessoal: em maquina corporativa nao instala nada.
+#
 # Uso:
-#   ./leds.sh              instala / atualiza
-#   ./leds.sh --remover    desfaz tudo (mantem os pacotes)
+#   ./leds.sh [--pessoal|--corporativo]   instala / atualiza
+#   ./leds.sh --remover                   desfaz tudo (mantem os pacotes)
 
 set -uo pipefail
 
@@ -40,7 +49,10 @@ fi
 SRC="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)/leds"
 CFG_DIR="$HOME/.config/rgb-gabinete"
 PW_CONF="$HOME/.config/pipewire/pipewire.conf.d/90-rgb-audio.conf"
+LIB="$HOME/.local/lib/rgb-gabinete"
 LAUNCHER="$HOME/.local/bin/openrgb-gabinete"
+DOTA_BIN="$HOME/.local/bin/dota-rgb"
+DOTA_UNIT="$HOME/.config/systemd/user/dota-rgb.service"
 AUTOSTART="$HOME/.config/autostart/openrgb-gabinete.desktop"
 
 stop_openrgb() {
@@ -60,15 +72,44 @@ restart_audio() {
 
 remover() {
   echo "=== Removendo RGB do gabinete ==="
+  systemctl --user disable --now dota-rgb.service 2>/dev/null
   stop_openrgb
-  rm -f "$LAUNCHER" "$AUTOSTART" "$PW_CONF" "$HOME/.config/OpenRGB/profiles/Gabinete.json"
-  rm -rf "$CFG_DIR"
+  rm -f "$LAUNCHER" "$DOTA_BIN" "$DOTA_UNIT" "$AUTOSTART" "$PW_CONF" \
+        "$HOME/.config/OpenRGB/profiles/Gabinete.json" "$HOME/.config/OpenRGB/profiles/Dota.json"
+  rm -rf "$CFG_DIR" "$LIB"
+  systemctl --user daemon-reload
   restart_audio
   echo "Concluido (pacotes e o restante da configuracao do OpenRGB foram mantidos)."
 }
 
-if [ "${1:-}" = "--remover" ]; then
+# Perfil da maquina: "pessoal" instala o que e do computador de casa (RGB,
+# teclado, perifericos); "corporativo" pula essas partes. O FirstInstall.sh
+# pergunta uma vez e repassa --pessoal/--corporativo; rodando sozinho no
+# terminal, pergunta aqui; sem terminal, assume corporativo.
+PERFIL=""
+REMOVER=0
+for arg in "$@"; do
+  case "$arg" in
+    --pessoal)     PERFIL="pessoal" ;;
+    --corporativo) PERFIL="corporativo" ;;
+    --remover)     REMOVER=1 ;;
+  esac
+done
+if [ -z "$PERFIL" ] && [ "$REMOVER" -eq 0 ]; then
+  if [ -t 0 ]; then
+    read -rp "Maquina pessoal ou corporativa? [p/c]: " resp
+    case "$resp" in p|P|pessoal) PERFIL="pessoal" ;; *) PERFIL="corporativo" ;; esac
+  else
+    PERFIL="corporativo"
+  fi
+fi
+
+if [ "$REMOVER" -eq 1 ]; then
   remover
+  exit 0
+fi
+if [ "$PERFIL" != "pessoal" ]; then
+  echo "leds.sh: maquina corporativa, nada a instalar"
   exit 0
 fi
 
@@ -128,7 +169,12 @@ python3 "$CFG_DIR/rgb-config.py" || echo "  [aviso] falha ao gerar a configuraca
 # Inicializacao
 # ---------------------------------------------------------------------------
 echo "=== Inicializacao: openrgb-gabinete + autostart ==="
-install -Dm755 "$SRC/openrgb-gabinete" "$LAUNCHER"
+mkdir -p "$LIB" "$HOME/.local/bin"
+install -m644 "$SRC/rgbsdk.py" "$LIB/"
+install -m755 "$SRC/openrgb-gabinete" "$SRC/dota-rgb" "$SRC/dota-setup.py" "$LIB/"
+rm -f "$LAUNCHER"                                   # versao antiga era um arquivo solto
+ln -sf "$LIB/openrgb-gabinete" "$LAUNCHER"
+ln -sf "$LIB/dota-rgb" "$DOTA_BIN"
 rm -f "$HOME/.config/autostart/OpenRGB.desktop"     # autostart proprio do OpenRGB
 mkdir -p "$(dirname "$AUTOSTART")"
 cat > "$AUTOSTART" <<EOF
@@ -141,6 +187,29 @@ Icon=OpenRGB
 X-KDE-autostart-after=panel
 EOF
 
+# ---------------------------------------------------------------------------
+# Dota 2
+# ---------------------------------------------------------------------------
+echo "=== Dota 2: GSI + servico dota-rgb ==="
+python3 "$LIB/dota-setup.py" || echo "  [aviso] falha ao configurar o GSI do Dota"
+mkdir -p "$(dirname "$DOTA_UNIT")"
+cat > "$DOTA_UNIT" <<EOF
+[Unit]
+Description=RGB seguindo o Dota 2 (OpenRGB + Game State Integration)
+After=graphical-session.target
+
+[Service]
+ExecStart=${DOTA_BIN}
+Restart=on-failure
+RestartSec=5
+
+[Install]
+WantedBy=default.target
+EOF
+systemctl --user daemon-reload
+systemctl --user enable dota-rgb.service
+systemctl --user restart dota-rgb.service
+
 if [ -n "${WAYLAND_DISPLAY:-}${DISPLAY:-}" ]; then
   setsid "$LAUNCHER" >/dev/null 2>&1 < /dev/null &
   echo "  OpenRGB iniciado"
@@ -150,6 +219,7 @@ echo ""
 echo "======================================"
 echo " Concluido."
 echo " O OpenRGB abre sozinho no login (bandeja), com os efeitos de audio."
+echo " Com o Dota 2 aberto, o perfil muda sozinho para o do jogo."
 echo " Para ajustar efeitos: edite leds/rgb-config.py e rode este script de novo."
 echo " Para desfazer: ./leds.sh --remover"
 echo "======================================"

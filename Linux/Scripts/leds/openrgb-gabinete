@@ -12,11 +12,12 @@
 import ctypes
 import json
 import os
-import socket
-import struct
 import subprocess
 import sys
 import time
+
+sys.path.insert(0, os.path.dirname(os.path.realpath(__file__)))
+from rgbsdk import SDK  # noqa: E402
 
 PROFILE = os.path.expanduser("~/.config/OpenRGB/profiles/Gabinete.json")
 ZONES = os.path.expanduser("~/.config/rgb-gabinete/zonas.json")
@@ -73,88 +74,6 @@ def fix_audio_device():
         os.replace(tmp, PROFILE)
 
 
-# ---------------------------------------------------------------------------
-# SDK do OpenRGB (protocolo 3): so o necessario para redimensionar zonas
-# ---------------------------------------------------------------------------
-class Reader:
-    def __init__(self, data):
-        self.d, self.o = data, 0
-
-    def take(self, fmt):
-        v = struct.unpack_from("<" + fmt, self.d, self.o)
-        self.o += struct.calcsize("<" + fmt)
-        return v if len(v) > 1 else v[0]
-
-    def string(self):
-        n = self.take("H")
-        s = self.d[self.o:self.o + n].rstrip(b"\0").decode(errors="replace")
-        self.o += n
-        return s
-
-
-def parse_controller(data):
-    """Retorna (nome, [(nome_zona, leds, min, max)])."""
-    r = Reader(data)
-    r.take("Ii")                                  # tamanho, tipo
-    name = r.string()
-    for _ in range(5):                            # vendor, descricao, versao, serial, local
-        r.string()
-    nmodes = r.take("H")
-    r.take("i")                                   # modo ativo
-    for _ in range(nmodes):
-        r.string()
-        r.take("iIIIIIIIIIII")
-        ncolors = r.take("H")
-        r.o += 4 * ncolors
-    zones = []
-    for _ in range(r.take("H")):
-        zname = r.string()
-        _, lmin, lmax, count = r.take("iIII")
-        mlen = r.take("H")
-        r.o += mlen
-        zones.append((zname, count, lmin, lmax))
-    return name, zones
-
-
-class SDK:
-    def __init__(self):
-        self.s = socket.create_connection(("127.0.0.1", 6742), timeout=5)
-        self.send(0, 40, struct.pack("<I", 3))
-        self.proto = min(3, struct.unpack("<I", self.recv(40))[0])
-        self.send(0, 50, b"openrgb-gabinete\0")
-
-    def send(self, dev, pkt, data=b""):
-        self.s.sendall(b"ORGB" + struct.pack("<III", dev, pkt, len(data)) + data)
-
-    def _exact(self, n):
-        buf = b""
-        while len(buf) < n:
-            chunk = self.s.recv(n - len(buf))
-            if not chunk:
-                raise ConnectionError("OpenRGB fechou a conexao")
-            buf += chunk
-        return buf
-
-    def recv(self, want):
-        while True:
-            _, _, pkt, size = struct.unpack("<4sIII", self._exact(16))
-            data = self._exact(size)
-            if pkt == want:
-                return data
-
-    def controllers(self):
-        self.send(0, 0)
-        n = struct.unpack("<I", self.recv(0))[0]
-        out = []
-        for i in range(n):
-            self.send(i, 1, struct.pack("<I", self.proto))
-            out.append(parse_controller(self.recv(1)))
-        return out
-
-    def resize_zone(self, dev, zone, size):
-        self.send(dev, 1000, struct.pack("<ii", zone, size))
-
-
 def fix_zone_sizes(timeout=90):
     try:
         with open(ZONES) as f:
@@ -164,9 +83,9 @@ def fix_zone_sizes(timeout=90):
     deadline = time.time() + timeout
     while time.time() < deadline:
         try:
-            sdk = SDK()
+            sdk = SDK("openrgb-gabinete")
             ctrls = sdk.controllers()
-            if all(any(w["match"] in name for name, _ in ctrls) for w in wanted):
+            if all(any(w["match"] in c.name for c in ctrls) for w in wanted):
                 break
         except OSError:
             pass
@@ -175,13 +94,13 @@ def fix_zone_sizes(timeout=90):
         log("OpenRGB nao detectou todos os controladores a tempo")
         return
     for w in wanted:
-        for dev, (name, zones) in enumerate(ctrls):
-            if w["match"] not in name or w["zone"] >= len(zones):
+        for c in ctrls:
+            if w["match"] not in c.name or w["zone"] >= len(c.zones):
                 continue
-            zname, count, lmin, lmax = zones[w["zone"]]
-            if count != w["size"] and lmin <= w["size"] <= lmax:
-                log(f"{name} / {zname}: {count} -> {w['size']} LEDs")
-                sdk.resize_zone(dev, w["zone"], w["size"])
+            z = c.zones[w["zone"]]
+            if z.count != w["size"] and z.min <= w["size"] <= z.max:
+                log(f"{c.name} / {z.name}: {z.count} -> {w['size']} LEDs")
+                sdk.resize_zone(c.index, w["zone"], w["size"])
 
 
 if __name__ == "__main__":

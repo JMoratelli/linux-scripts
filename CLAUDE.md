@@ -17,6 +17,12 @@
   dele (`perifericos.sh` → `perifericos/`, `leds.sh` → `leds/`). O FirstInstall
   só roda os `*.sh` do nível de cima, nunca o que está nas subpastas; o script
   acha a pasta pelo próprio caminho (`dirname "${BASH_SOURCE[0]}"`).
+- Perfil da máquina: o FirstInstall pergunta uma vez se é pessoal ou
+  corporativa e passa `--pessoal` ou `--corporativo` para cada script (com
+  stdin em `/dev/null`). Tudo que é do computador de casa (RGB, teclado,
+  periféricos específicos) só instala com `--pessoal`. Rodando um script
+  sozinho sem a flag, ele pergunta se houver terminal; sem terminal, assume
+  corporativo.
 - `perifericos.sh` roda como root (sudo sozinho); `leds.sh` roda como usuário
   (configuração do OpenRGB e do PipeWire ficam no home) e só usa sudo para
   instalar pacotes.

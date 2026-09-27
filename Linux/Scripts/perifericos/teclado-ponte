@@ -1,0 +1,141 @@
+#!/usr/bin/env python3
+"""teclado-ponte: poe o Redragon K629 (cabo USB) dentro do OpenRGB.
+
+O OpenRGB nao tem driver para este teclado. Ele e cadastrado no OpenRGB como
+um dispositivo DDP em 127.0.0.1:4049 com 126 LEDs (matriz 21x6, ver leds.sh),
+e esta ponte recebe os quadros DDP e repassa ao teclado pelo feature report
+0x08 0x0a, o mesmo do "Modo de musica" do software oficial. Esse report e so
+exibicao ao vivo: nao grava nada na memoria do teclado.
+
+Quadro do teclado: 126 posicoes x RGB, coluna por coluna, 6 teclas por coluna
+(posicao = coluna*6 + linha, linha 0 = F1..F12, linha 5 = Ctrl/espaco).
+
+Entrar e sair do streaming e como o software oficial faz: regravando o bloco
+de configuracao 0xB6 com o mesmo conteudo (leitura-modificacao-escrita do
+redragon-led; nunca o 0xD4). Sem essa regravacao o teclado fica preso no
+ultimo quadro e o Fn+espaco deixa de religar a luz ate desligar o teclado
+pela chave. Sem quadros por IDLE segundos (OpenRGB fechado) ou ao encerrar,
+a ponte sai do streaming e o teclado volta ao efeito gravado nele.
+"""
+import fcntl
+import glob
+import importlib.machinery
+import importlib.util
+import os
+import select
+import signal
+import socket
+import sys
+import time
+
+VID, PID = 0x258A, 0x0049
+LISTEN = ("127.0.0.1", 4049)
+LEDS = 126
+MAX_FPS = 40
+IDLE = 1.5
+
+
+def ioc(direction, nr, size):
+    return (direction << 30) | (size << 16) | (ord("H") << 8) | nr
+
+
+def find_dev():
+    if os.path.exists("/dev/redragon-k629"):
+        return "/dev/redragon-k629"
+    for path in sorted(glob.glob("/sys/class/hidraw/hidraw*")):
+        try:
+            uevent = open(f"{path}/device/uevent").read()
+            desc = open(f"{path}/device/report_descriptor", "rb").read()
+        except OSError:
+            continue
+        if f"HID_ID=0003:{VID:08X}:{PID:08X}" in uevent and b"\x85\x08" in desc:
+            return "/dev/" + os.path.basename(path)
+    return None
+
+
+def load_redragon_led():
+    """Reaproveita a leitura/gravacao do bloco 0xB6 do redragon-led (mesma pasta)."""
+    path = os.path.join(os.path.dirname(os.path.realpath(__file__)), "redragon-led")
+    loader = importlib.machinery.SourceFileLoader("redragon_led", path)
+    mod = importlib.util.module_from_spec(importlib.util.spec_from_loader("redragon_led", loader))
+    loader.exec_module(mod)
+    return mod
+
+
+class Keyboard:
+    def __init__(self, dev):
+        self.fd = os.open(dev, os.O_RDWR)
+        self.req = ioc(3, 0x06, 4 + 3 * LEDS)    # HIDIOCSFEATURE(382)
+        self.led = load_redragon_led()
+        self.streaming = False
+
+    def refresh_config(self):
+        """Regrava o 0xB6 com o conteudo atual, como o software oficial."""
+        self.led.write_block(self.fd, bytearray(self.led.read_block(self.fd)))
+
+    def send(self, rgb):
+        if not self.streaming:
+            self.refresh_config()
+            self.streaming = True
+        fcntl.ioctl(self.fd, self.req, bytearray(b"\x08\x0a\x7a\x01") + rgb)
+
+    def stop(self):
+        if self.streaming:
+            self.refresh_config()               # volta ao efeito gravado no teclado
+            self.streaming = False
+
+
+def main():
+    dev = find_dev()
+    if not dev:
+        sys.exit("teclado 258a:0049 nao encontrado (precisa estar no cabo USB)")
+    kb = Keyboard(dev)
+    signal.signal(signal.SIGTERM, lambda *_: sys.exit(0))
+    try:
+        run(kb)
+    finally:
+        try:
+            kb.stop()
+        except (OSError, SystemExit):
+            pass
+
+
+def run(kb):
+    sock = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
+    sock.bind(LISTEN)
+
+    frame = bytearray(3 * LEDS)
+    dirty = False
+    last_rx = last_tx = 0.0
+    min_gap = 1.0 / MAX_FPS
+    while True:
+        ready, _, _ = select.select([sock], [], [], 0.25)
+        now = time.monotonic()
+        if ready:
+            pkt = sock.recv(1500)
+            if len(pkt) >= 10:
+                flags = pkt[0]
+                header = 14 if flags & 0x10 else 10  # com timecode o cabecalho cresce
+                offset = int.from_bytes(pkt[4:8], "big")
+                length = int.from_bytes(pkt[8:10], "big")
+                data = pkt[header:header + length]
+                end = min(len(frame), offset + len(data))
+                if offset < end:
+                    frame[offset:end] = data[:end - offset]
+                    dirty = True
+                last_rx = now
+        try:
+            if dirty and now - last_tx >= min_gap:
+                kb.send(frame)
+                dirty, last_tx = False, now
+            elif kb.streaming and now - last_rx > IDLE:   # OpenRGB parou de mandar
+                kb.stop()
+        except OSError as e:                       # teclado desconectado
+            sys.exit(f"teclado desconectado: {e}")
+
+
+if __name__ == "__main__":
+    try:
+        main()
+    except KeyboardInterrupt:
+        pass

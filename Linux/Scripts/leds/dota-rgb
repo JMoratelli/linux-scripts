@@ -1,0 +1,244 @@
+#!/usr/bin/env python3
+"""dota-rgb: RGB do gabinete e do teclado seguindo o Dota 2.
+
+- Dota abriu  -> carrega o perfil "Dota" do OpenRGB (sem efeitos do plugin)
+                 e passa a pintar os LEDs pelo SDK
+- Dota fechou -> volta para o perfil "Gabinete" (efeitos de audio)
+
+O estado da partida chega pelo Game State Integration do Dota (arquivo em
+game/dota/cfg/gamestate_integration/ + opcao de inicializacao
+-gamestateintegration, ver leds.sh) num servidor HTTP em 127.0.0.1:3000.
+
+Teclado: so as teclas de acao acendem (Q W E D F R habilidades, Z X C V B N
+itens), o resto fica apagado; pronta = verde, recarga = vermelho, sem mana =
+azul, passiva = roxo fraco; usar uma habilidade/item pisca a tecla em branco.
+O ultimo estado recebido fica em ~/.cache/dota-rgb/gsi.json (diagnostico).
+Gabinete: fan frontal na cor do time, fan superior 1 = vida, fan superior 2 =
+mana, o resto na cor do time mais fraca; morto = vermelho escuro.
+"""
+import json
+import math
+import os
+import sys
+import threading
+import time
+from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
+
+sys.path.insert(0, os.path.dirname(os.path.realpath(__file__)))
+from rgbsdk import SDK  # noqa: E402
+
+GSI_ADDR = ("127.0.0.1", 3000)
+FPS = 20
+PROFILE_GAME, PROFILE_NORMAL = "Dota", "Gabinete"
+PROCESS = "dota2"
+GSI_TIMEOUT = 40                  # sem dados do jogo ha tanto tempo = menu
+DUMP = os.path.expanduser("~/.cache/dota-rgb/gsi.json")
+
+# posicao de cada tecla no quadro do K629 (coluna*6 + linha)
+KEY = {"Q": 8, "W": 14, "E": 20, "R": 26, "D": 21, "F": 27,
+       "Z": 10, "X": 16, "C": 22, "V": 28, "B": 34, "N": 40}
+ABILITY_KEYS = [KEY[k] for k in "QWEDF"]          # na ordem do GSI; ultimate vai no R
+ULT_KEY = KEY["R"]
+ITEM_KEYS = [KEY[k] for k in "ZXCVBN"]
+
+TEAM = {"radiant": (0, 200, 40), "dire": (220, 20, 0)}
+READY, COOLDOWN, NO_MANA, PASSIVE = (40, 255, 40), (140, 0, 0), (0, 50, 255), (40, 0, 60)
+DEAD = (60, 0, 0)
+FLASH = 0.3
+
+
+def scale(c, k):
+    return tuple(max(0, min(255, int(v * k))) for v in c)
+
+
+def lerp(a, b, t):
+    return tuple(int(x + (y - x) * t) for x, y in zip(a, b))
+
+
+class GSI:
+    """Guarda o ultimo estado enviado pelo Dota."""
+
+    def __init__(self):
+        self.state, self.stamp = {}, 0.0
+        self.lock = threading.Lock()
+        gsi = self
+
+        class Handler(BaseHTTPRequestHandler):
+            def do_POST(self):
+                n = int(self.headers.get("Content-Length", 0))
+                try:
+                    data = json.loads(self.rfile.read(n) or b"{}")
+                except json.JSONDecodeError:
+                    data = None
+                if data is not None:
+                    with gsi.lock:
+                        gsi.state, gsi.stamp = data, time.monotonic()
+                    gsi.dump(data)
+                self.send_response(200)
+                self.end_headers()
+
+            def log_message(self, *args):
+                pass
+
+        server = ThreadingHTTPServer(GSI_ADDR, Handler)
+        threading.Thread(target=server.serve_forever, daemon=True).start()
+
+    def dump(self, data):
+        now = time.monotonic()
+        if now - getattr(self, "last_dump", 0) < 2:
+            return
+        self.last_dump = now
+        try:
+            os.makedirs(os.path.dirname(DUMP), exist_ok=True)
+            with open(DUMP + ".tmp", "w") as f:
+                json.dump(data, f, indent=1)
+            os.replace(DUMP + ".tmp", DUMP)
+        except OSError:
+            pass
+
+    def get(self):
+        with self.lock:
+            fresh = time.monotonic() - self.stamp < GSI_TIMEOUT
+            return self.state if fresh else {}
+
+
+def dota_running():
+    for pid in os.listdir("/proc"):
+        if pid.isdigit():
+            try:
+                with open(f"/proc/{pid}/comm") as f:
+                    if f.read().strip() == PROCESS:
+                        return True
+            except OSError:
+                pass
+    return False
+
+
+class Painter:
+    def __init__(self):
+        self.cooldowns = {}          # chave da tecla -> cooldown anterior
+        self.flash = {}              # chave da tecla -> instante do flash
+
+    def slot_color(self, key, slot, now):
+        """Cor de uma habilidade/item; detecta o uso pelo cooldown subindo."""
+        cd = slot.get("cooldown", 0) or 0
+        if cd > self.cooldowns.get(key, 0) + 0.5:
+            self.flash[key] = now
+        self.cooldowns[key] = cd
+        if now - self.flash.get(key, -9) < FLASH:
+            return (255, 255, 255)
+        if slot.get("level", 1) == 0 or slot.get("name") in (None, "empty"):
+            return (0, 0, 0)
+        if slot.get("passive"):
+            return PASSIVE
+        if cd > 0:
+            return COOLDOWN
+        if not slot.get("can_cast", True):
+            return NO_MANA
+        return READY
+
+    def keyboard(self, state, n, now):
+        hero = state.get("hero", {})
+        px = [(0, 0, 0)] * n                     # so as teclas de acao acendem
+        if hero and not hero.get("alive", True):
+            return [DEAD] * n
+        abilities = [a for _, a in sorted(state.get("abilities", {}).items())
+                     if isinstance(a, dict) and not a.get("name", "").startswith(("generic_hidden", "plus_"))]
+        normal = [a for a in abilities if not a.get("ultimate")]
+        for key, a in zip(ABILITY_KEYS, normal):
+            px[key] = self.slot_color(key, a, now)
+        ult = next((a for a in abilities if a.get("ultimate")), None)
+        if ult:
+            px[ULT_KEY] = self.slot_color(ULT_KEY, ult, now)
+        items = state.get("items", {})
+        for i, key in enumerate(ITEM_KEYS):
+            slot = items.get(f"slot{i}")
+            if isinstance(slot, dict):
+                px[key] = self.slot_color(key, slot, now)
+        return px
+
+
+def ring(count, frac, color):
+    lit = round(count * max(0.0, min(1.0, frac)))
+    return [color] * lit + [(0, 0, 0)] * (count - lit)
+
+
+def paint(sdk, ctrls, state, painter, now):
+    team = TEAM.get(state.get("player", {}).get("team_name"))
+    hero = state.get("hero", {})
+    in_game = bool(hero) and team is not None
+    breathe = 0.25 + 0.15 * (1 + math.sin(now * 1.5))
+    base = team or (200, 30, 0)                  # menu: vermelho do Dota respirando
+    dead = in_game and not hero.get("alive", True)
+    hp = (hero.get("health_percent", 0) or 0) / 100
+    mp = (hero.get("mana_percent", 0) or 0) / 100
+
+    for c in ctrls:
+        if "Redragon" in c.name:
+            if in_game:
+                colors = painter.keyboard(state, c.num_leds, now)
+            else:
+                colors = [scale(base, breathe)] * c.num_leds
+        elif "Razer Chroma" in c.name:
+            colors = []
+            for zi, z in enumerate(c.zones):
+                if not in_game:
+                    colors += [scale(base, breathe)] * z.count
+                elif dead:
+                    colors += [DEAD] * z.count
+                elif zi == 2:                                   # fan frontal
+                    colors += [team] * z.count
+                elif zi == 1:                                   # fan superior 1: vida
+                    colors += ring(z.count, hp, lerp((255, 0, 0), (0, 255, 0), hp))
+                elif zi == 3:                                   # fan superior 2: mana
+                    colors += ring(z.count, mp, (0, 60, 255))
+                else:                                           # fonte, H100
+                    colors += [scale(team, 0.3)] * z.count
+        else:                                                   # GPU, placa-mae, WLED
+            k = 0.6 if "WLED" in c.name else 0.3
+            colors = [DEAD if dead else scale(base, k if in_game else breathe)] * c.num_leds
+        if c.num_leds:
+            sdk.update_leds(c.index, colors)
+
+
+def main():
+    gsi = GSI()
+    painter = Painter()
+    sdk = ctrls = None
+    active = False
+    period = 1.0 / FPS
+    last_check = 0.0
+    while True:
+        now = time.monotonic()
+        if now - last_check > 3:
+            last_check = now
+            running = dota_running()
+            if running != active:
+                try:
+                    sdk = sdk or SDK("dota-rgb")
+                    sdk.load_profile(PROFILE_GAME if running else PROFILE_NORMAL)
+                    active = running
+                    if running:
+                        time.sleep(1)                   # plugin parando os efeitos
+                        ctrls = [c for c in sdk.controllers()
+                                 if not any(x in c.name for x in ("G502", "G733"))]
+                        for c in ctrls:
+                            sdk.custom_mode(c.index)
+                    print(f"perfil -> {PROFILE_GAME if running else PROFILE_NORMAL}", flush=True)
+                except OSError as e:
+                    print(f"OpenRGB indisponivel: {e}", flush=True)
+                    sdk = None
+        if active and sdk and ctrls:
+            try:
+                paint(sdk, ctrls, gsi.get(), painter, now)
+            except OSError as e:
+                print(f"conexao com OpenRGB perdida: {e}", flush=True)
+                sdk, active = None, False
+        time.sleep(max(0.0, period - (time.monotonic() - now)))
+
+
+if __name__ == "__main__":
+    try:
+        main()
+    except KeyboardInterrupt:
+        pass
