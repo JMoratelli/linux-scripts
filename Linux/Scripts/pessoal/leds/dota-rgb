@@ -1,20 +1,23 @@
 #!/usr/bin/env python3
-"""dota-rgb: RGB do gabinete e do teclado seguindo o Dota 2.
+"""dota-rgb: teclado e WLED da mesa seguindo o Dota 2.
 
-- Dota abriu  -> carrega o perfil "Dota" do OpenRGB (sem efeitos do plugin)
-                 e passa a pintar os LEDs pelo SDK
-- Dota fechou -> volta para o perfil "Gabinete" (efeitos de audio)
+- Dota abriu  -> carrega o perfil "Dota" do OpenRGB: os fans e o resto do
+                 gabinete continuam com os efeitos de audio, e o teclado e a
+                 WLED ficam sem efeito do plugin para este programa pintar
+- Dota fechou -> volta para o perfil "Gabinete"
 
 O estado da partida chega pelo Game State Integration do Dota (arquivo em
 game/dota/cfg/gamestate_integration/ + opcao de inicializacao
 -gamestateintegration, ver leds.sh) num servidor HTTP em 127.0.0.1:3000.
 
 Teclado: so as teclas de acao acendem (Q W E D F R habilidades, Z X C V B N
-itens), o resto fica apagado; pronta = verde, recarga = vermelho, sem mana =
-azul, passiva = roxo fraco; usar uma habilidade/item pisca a tecla em branco.
+itens), o resto fica apagado. So duas cores: verde = da para usar; vermelho =
+recarga, sem mana ou bloqueada.
+WLED: a fita inteira na cor da vida (verde -> amarelo -> vermelho); dano =
+pulso (apaga um instante e acende vermelho puro); cura grande = brilho verde;
+morto = vermelho vibrante e depois um scanner vermelho indo e voltando ate
+renascer, quando a fita pisca verde; fora da partida, respiracao fraca.
 O ultimo estado recebido fica em ~/.cache/dota-rgb/gsi.json (diagnostico).
-Gabinete: fan frontal na cor do time, fan superior 1 = vida, fan superior 2 =
-mana, o resto na cor do time mais fraca; morto = vermelho escuro.
 """
 import json
 import math
@@ -22,6 +25,7 @@ import os
 import sys
 import threading
 import time
+from colorsys import hsv_to_rgb
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 
 sys.path.insert(0, os.path.dirname(os.path.realpath(__file__)))
@@ -41,10 +45,10 @@ ABILITY_KEYS = [KEY[k] for k in "QWEDF"]          # na ordem do GSI; ultimate va
 ULT_KEY = KEY["R"]
 ITEM_KEYS = [KEY[k] for k in "ZXCVBN"]
 
-TEAM = {"radiant": (0, 200, 40), "dire": (220, 20, 0)}
-READY, COOLDOWN, NO_MANA, PASSIVE = (40, 255, 40), (140, 0, 0), (0, 50, 255), (40, 0, 60)
+GAME_DEVICES = ("Redragon K629", "WLED Mesa")     # o resto fica com os efeitos de audio
+READY, BLOCKED = (0, 255, 0), (255, 0, 0)          # teclado: so verde e vermelho
 DEAD = (60, 0, 0)
-FLASH = 0.3
+MENU = (200, 30, 0)                               # vermelho do Dota respirando
 
 
 def scale(c, k):
@@ -53,6 +57,10 @@ def scale(c, k):
 
 def lerp(a, b, t):
     return tuple(int(x + (y - x) * t) for x, y in zip(a, b))
+
+
+def hsv(h, s, v):
+    return tuple(int(c * 255) for c in hsv_to_rgb(h, s, v))
 
 
 class GSI:
@@ -115,26 +123,16 @@ def dota_running():
 
 
 class Painter:
-    def __init__(self):
-        self.cooldowns = {}          # chave da tecla -> cooldown anterior
-        self.flash = {}              # chave da tecla -> instante do flash
-
-    def slot_color(self, key, slot, now):
-        """Cor de uma habilidade/item; detecta o uso pelo cooldown subindo."""
-        cd = slot.get("cooldown", 0) or 0
-        if cd > self.cooldowns.get(key, 0) + 0.5:
-            self.flash[key] = now
-        self.cooldowns[key] = cd
-        if now - self.flash.get(key, -9) < FLASH:
-            return (255, 255, 255)
+    @staticmethod
+    def slot_color(slot):
+        """Verde = da para usar; vermelho = recarga, sem mana ou bloqueada;
+        apagada = nao aprendida / slot vazio. Passiva conta como disponivel."""
         if slot.get("level", 1) == 0 or slot.get("name") in (None, "empty"):
             return (0, 0, 0)
         if slot.get("passive"):
-            return PASSIVE
-        if cd > 0:
-            return COOLDOWN
-        if not slot.get("can_cast", True):
-            return NO_MANA
+            return READY
+        if (slot.get("cooldown", 0) or 0) > 0 or not slot.get("can_cast", True):
+            return BLOCKED
         return READY
 
     def keyboard(self, state, n, now):
@@ -146,64 +144,103 @@ class Painter:
                      if isinstance(a, dict) and not a.get("name", "").startswith(("generic_hidden", "plus_"))]
         normal = [a for a in abilities if not a.get("ultimate")]
         for key, a in zip(ABILITY_KEYS, normal):
-            px[key] = self.slot_color(key, a, now)
+            px[key] = self.slot_color(a)
         ult = next((a for a in abilities if a.get("ultimate")), None)
         if ult:
-            px[ULT_KEY] = self.slot_color(ULT_KEY, ult, now)
+            px[ULT_KEY] = self.slot_color(ult)
         items = state.get("items", {})
         for i, key in enumerate(ITEM_KEYS):
             slot = items.get(f"slot{i}")
             if isinstance(slot, dict):
-                px[key] = self.slot_color(key, slot, now)
+                px[key] = self.slot_color(slot)
         return px
 
 
-def ring(count, frac, color):
-    lit = round(count * max(0.0, min(1.0, frac)))
-    return [color] * lit + [(0, 0, 0)] * (count - lit)
+class HealthBar:
+    """WLED: cor da vida na fita inteira, flash de dano/cura; na morte, vermelho
+    vibrante e depois um scanner vermelho indo e voltando; ao renascer, pisca
+    verde."""
+
+    DEATH_RED = 2.0                  # segundos de vermelho vibrante ao morrer
+    RESPAWN_BLINK = 1.0              # segundos piscando verde ao renascer
+    HIT_GAP, HIT_FADE = 0.08, 0.6    # pulso de dano: apaga, vermelho puro, volta
+
+    def __init__(self):
+        self.last_hp = None
+        self.hit_at = None           # inicio do ultimo pulso de dano
+        self.heal = 0.0              # intensidade do brilho verde (0..1)
+        self.died_at = None
+        self.born_at = None
+
+    def render(self, hero, n, now):
+        if not hero.get("alive", True):
+            return self.dead(n, now)
+        if self.died_at is not None:                 # acabou de renascer
+            self.died_at, self.born_at = None, now
+        if self.born_at is not None and now - self.born_at < self.RESPAWN_BLINK:
+            on = int((now - self.born_at) / (self.RESPAWN_BLINK / 4)) % 2 == 0
+            return [(0, 255, 0) if on else (0, 0, 0)] * n
+        hp = (hero.get("health_percent", 0) or 0) / 100
+        if self.last_hp is not None:
+            delta = hp - self.last_hp
+            if delta <= -0.01:
+                self.hit_at = now                    # qualquer dano reinicia o pulso
+            elif delta > 0.10:
+                self.heal = 1.0
+        self.last_hp = hp
+        c = hsv(hp / 3, 1.0, 1.0)                    # vida: verde (120) -> vermelho (0)
+        if self.hit_at is not None:
+            t = now - self.hit_at
+            if t < self.HIT_GAP:
+                return [(0, 0, 0)] * n               # apaga um instante: pulso bem visivel
+            if t < self.HIT_GAP + self.HIT_FADE:
+                return [lerp((255, 0, 0), c, (t - self.HIT_GAP) / self.HIT_FADE)] * n
+            self.hit_at = None
+        if self.heal:
+            c = lerp(c, (0, 255, 60), self.heal * 0.6)
+        self.heal = max(0.0, self.heal - 0.06)
+        return [c] * n
+
+    def dead(self, n, now):
+        self.last_hp = None
+        if self.died_at is None:
+            self.died_at = now
+        t = now - self.died_at
+        if t < self.DEATH_RED:
+            return [(255, 0, 0)] * n
+        return self.scanner(n, t - self.DEATH_RED)
+
+    @staticmethod
+    def scanner(n, t, speed=1.2, tail=10):
+        """Ponto vermelho com rastro indo e voltando pela fita."""
+        span = max(1, n - 1)
+        phase = (t * speed) % 2
+        head = phase * span if phase < 1 else (2 - phase) * span
+        out = []
+        for i in range(n):
+            d = abs(i - head)
+            out.append(scale((255, 0, 0), max(0.0, 1 - d / tail)))
+        return out
 
 
-def paint(sdk, ctrls, state, painter, now):
-    team = TEAM.get(state.get("player", {}).get("team_name"))
+def paint(sdk, ctrls, state, painter, bar, now):
     hero = state.get("hero", {})
-    in_game = bool(hero) and team is not None
-    breathe = 0.25 + 0.15 * (1 + math.sin(now * 1.5))
-    base = team or (200, 30, 0)                  # menu: vermelho do Dota respirando
-    dead = in_game and not hero.get("alive", True)
-    hp = (hero.get("health_percent", 0) or 0) / 100
-    mp = (hero.get("mana_percent", 0) or 0) / 100
-
+    in_game = bool(hero) and "team_name" in state.get("player", {})
+    menu = scale(MENU, 0.25 + 0.15 * (1 + math.sin(now * 1.5)))
     for c in ctrls:
-        if "Redragon" in c.name:
-            if in_game:
-                colors = painter.keyboard(state, c.num_leds, now)
-            else:
-                colors = [scale(base, breathe)] * c.num_leds
-        elif "Razer Chroma" in c.name:
-            colors = []
-            for zi, z in enumerate(c.zones):
-                if not in_game:
-                    colors += [scale(base, breathe)] * z.count
-                elif dead:
-                    colors += [DEAD] * z.count
-                elif zi == 2:                                   # fan frontal
-                    colors += [team] * z.count
-                elif zi == 1:                                   # fan superior 1: vida
-                    colors += ring(z.count, hp, lerp((255, 0, 0), (0, 255, 0), hp))
-                elif zi == 3:                                   # fan superior 2: mana
-                    colors += ring(z.count, mp, (0, 60, 255))
-                else:                                           # fonte, H100
-                    colors += [scale(team, 0.3)] * z.count
-        else:                                                   # GPU, placa-mae, WLED
-            k = 0.6 if "WLED" in c.name else 0.3
-            colors = [DEAD if dead else scale(base, k if in_game else breathe)] * c.num_leds
+        if not in_game:
+            colors = [menu] * c.num_leds
+        elif "Redragon" in c.name:
+            colors = painter.keyboard(state, c.num_leds, now)
+        else:                                                   # WLED
+            colors = bar.render(hero, c.num_leds, now)
         if c.num_leds:
             sdk.update_leds(c.index, colors)
 
 
 def main():
     gsi = GSI()
-    painter = Painter()
+    painter, bar = Painter(), HealthBar()
     sdk = ctrls = None
     active = False
     period = 1.0 / FPS
@@ -213,6 +250,12 @@ def main():
         if now - last_check > 3:
             last_check = now
             running = dota_running()
+            if active and running and sdk:
+                try:                                    # OpenRGB reiniciou/trocou de perfil?
+                    if sdk.active_profile() != PROFILE_GAME:
+                        active = False
+                except OSError:
+                    sdk, active = None, False
             if running != active:
                 try:
                     sdk = sdk or SDK("dota-rgb")
@@ -220,8 +263,7 @@ def main():
                     active = running
                     if running:
                         time.sleep(1)                   # plugin parando os efeitos
-                        ctrls = [c for c in sdk.controllers()
-                                 if not any(x in c.name for x in ("G502", "G733"))]
+                        ctrls = [c for c in sdk.controllers() if c.name in GAME_DEVICES]
                         for c in ctrls:
                             sdk.custom_mode(c.index)
                     print(f"perfil -> {PROFILE_GAME if running else PROFILE_NORMAL}", flush=True)
@@ -230,7 +272,7 @@ def main():
                     sdk = None
         if active and sdk and ctrls:
             try:
-                paint(sdk, ctrls, gsi.get(), painter, now)
+                paint(sdk, ctrls, gsi.get(), painter, bar, now)
             except OSError as e:
                 print(f"conexao com OpenRGB perdida: {e}", flush=True)
                 sdk, active = None, False

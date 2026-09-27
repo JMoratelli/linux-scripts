@@ -6,7 +6,7 @@ Escreve em ~/.config/OpenRGB:
   - Configuration.json   tamanho e nome das zonas ARGB (se ja existir) e o
                          teclado K629 como matriz 21x6
   - profiles/Gabinete.json  efeitos de audio por zona (Effects Plugin)
-  - profiles/Dota.json      sem efeitos (o dota-rgb pinta pelo SDK)
+  - profiles/Dota.json      o mesmo sem teclado e WLED (o dota-rgb pinta os dois)
 e ~/.config/rgb-gabinete/zonas.json, conferido pelo openrgb-gabinete.
 """
 import json
@@ -14,7 +14,7 @@ import os
 
 CFG = os.path.expanduser("~/.config/OpenRGB")
 PROFILE = "Gabinete"
-PROFILE_DOTA = "Dota"       # sem efeitos: quem pinta e o dota-rgb, pelo SDK
+PROFILE_DOTA = "Dota"       # teclado e WLED ficam com o dota-rgb; o resto segue o audio
 PLUGIN = "OpenRGB Effects Plugin"
 
 # Detectores desligados: Logitech (G502/G733 ficam sempre apagados, ver perifericos.sh)
@@ -214,44 +214,50 @@ def zones_json():
     save(os.path.expanduser("~/.config/rgb-gabinete/zonas.json"), wanted)
 
 
-def profile_json():
-    path = os.path.join(CFG, "profiles", PROFILE + ".json")
-    effects = []
-    for name, cls, zone_list, custom, brightness in EFFECTS:
-        effects.append({
-            "EffectClassName": cls,
-            "CustomName": name,
-            "FPS": 60,
-            "Speed": 50,
-            "Slider2Val": 1,
-            "RandomColors": False,
-            "AllowOnlyFirst": False,
-            "Brightness": brightness,
-            "Temperature": 0,
-            "Tint": 0,
-            "UserColors": [],
-            "AutoStart": True,
-            "SelectAll": False,
-            "ControllerZones": [dict(ident, zone_idx=z, reverse=False, self_brightness=100,
-                                     is_segment=False, segment_idx=-1) for ident, z in zone_list],
-            "CustomSettings": custom,
-        })
-    profile = {
-        "profile_name": PROFILE,
+def effect_json(name, cls, zone_list, custom, brightness):
+    return {
+        "EffectClassName": cls,
+        "CustomName": name,
+        "FPS": 60,
+        "Speed": 50,
+        "Slider2Val": 1,
+        "RandomColors": False,
+        "AllowOnlyFirst": False,
+        "Brightness": brightness,
+        "Temperature": 0,
+        "Tint": 0,
+        "UserColors": [],
+        "AutoStart": True,
+        "SelectAll": False,
+        "ControllerZones": [dict(ident, zone_idx=z, reverse=False, self_brightness=100,
+                                 is_segment=False, segment_idx=-1) for ident, z in zone_list],
+        "CustomSettings": custom,
+    }
+
+
+def write_profile(name, effects):
+    save(os.path.join(CFG, "profiles", name + ".json"), {
+        "profile_name": name,
         "profile_version": 6,
         "controllers": [],
         "plugins": {PLUGIN: {"version": 2, "Effects": effects}},
-    }
-    save(path, profile)
+    })
+
+
+def profile_json():
+    write_profile(PROFILE, [effect_json(*e) for e in EFFECTS])
 
 
 def dota_profile_json():
-    save(os.path.join(CFG, "profiles", PROFILE_DOTA + ".json"), {
-        "profile_name": PROFILE_DOTA,
-        "profile_version": 6,
-        "controllers": [],
-        "plugins": {PLUGIN: {"version": 2, "Effects": []}},
-    })
+    """Igual ao Gabinete, sem os efeitos do teclado e da WLED: esses dois o
+    dota-rgb pinta com o estado da partida; o resto segue o audio."""
+    game = (KEYBOARD["name"], WLED["name"])
+    effects = []
+    for name, cls, zone_list, custom, brightness in EFFECTS:
+        zones = [(ident, z) for ident, z in zone_list if ident["name"] not in game]
+        if zones:
+            effects.append(effect_json(name, cls, zones, custom, brightness))
+    write_profile(PROFILE_DOTA, effects)
 
 
 if __name__ == "__main__":
