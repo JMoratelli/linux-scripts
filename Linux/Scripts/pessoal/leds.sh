@@ -7,7 +7,7 @@
 #
 #   - "RGB Audio": entrada virtual do PipeWire com o que toca na saida
 #     padrao (acompanha a troca fone/HDMI)
-#   - rgb-config.py: gera do zero a configuracao do OpenRGB (detectores
+#   - rgb_config.py: gera do zero a configuracao do OpenRGB (detectores
 #     ignorados, WLED da mesa, tamanho/nome das zonas ARGB) e o perfil
 #     "Gabinete" com um efeito de audio por zona:
 #       fan frontal = grave, fan superior 1 = medio, fan superior 2 = agudo,
@@ -22,6 +22,9 @@
 #     time); ao fechar volta para o "Gabinete". dota-setup.py grava o arquivo
 #     do GSI na pasta do Dota e a opcao -gamestateintegration no Steam.
 #   - rgbsdk.py: cliente do SDK do OpenRGB usado pelos dois
+#   - rgb-casa: janela simples (GTK4) para escolher o efeito de cada zona,
+#     na bandeja do KDE; grava ~/.config/rgb-casa/config.json, gera os
+#     perfis (rgb_config.py) e recarrega o OpenRGB na hora
 #
 # Os Logitech (G502/G733) ficam de fora do OpenRGB: os LEDs deles ficam sempre
 # apagados pelo perifericos.sh. O teclado Redragon entra no OpenRGB como um
@@ -54,6 +57,10 @@ LAUNCHER="$HOME/.local/bin/openrgb-gabinete"
 DOTA_BIN="$HOME/.local/bin/dota-rgb"
 DOTA_UNIT="$HOME/.config/systemd/user/dota-rgb.service"
 AUTOSTART="$HOME/.config/autostart/openrgb-gabinete.desktop"
+UI_BIN="$HOME/.local/bin/rgb-casa"
+UI_DESKTOP="$HOME/.local/share/applications/rgb-casa.desktop"
+UI_AUTOSTART="$HOME/.config/autostart/rgb-casa.desktop"
+ICON_DIR="$HOME/.local/share/icons/hicolor/scalable/apps"
 
 stop_openrgb() {
   # o OpenRGB regrava a configuracao ao sair; fecha antes de mexer nela
@@ -73,8 +80,10 @@ restart_audio() {
 remover() {
   echo "=== Removendo RGB do gabinete ==="
   systemctl --user disable --now dota-rgb.service 2>/dev/null
+  pkill -f "^python3 .*/rgb-casa" 2>/dev/null
   stop_openrgb
   rm -f "$LAUNCHER" "$DOTA_BIN" "$DOTA_UNIT" "$AUTOSTART" "$PW_CONF" \
+        "$UI_BIN" "$UI_DESKTOP" "$UI_AUTOSTART" "$ICON_DIR/rgb-casa.svg" \
         "$HOME/.config/OpenRGB/profiles/Gabinete.json" "$HOME/.config/OpenRGB/profiles/Dota.json"
   rm -rf "$CFG_DIR" "$LIB"
   systemctl --user daemon-reload
@@ -102,7 +111,7 @@ fi
 echo "=== Pacotes: OpenRGB, OpenAL, PipeWire/Pulse, Effects Plugin ==="
 if command -v pacman >/dev/null 2>&1; then
   missing=()
-  for pkg in openrgb openal libpulse python; do
+  for pkg in openrgb openal libpulse python python-gobject gtk4 libadwaita adwaita-icon-theme; do
     pacman -Q "$pkg" >/dev/null 2>&1 || missing+=("$pkg")
   done
   if [ "${#missing[@]}" -gt 0 ]; then
@@ -139,20 +148,20 @@ fi
 # ---------------------------------------------------------------------------
 echo "=== OpenRGB: configuracao e perfil 'Gabinete' ==="
 stop_openrgb
-mkdir -p "$CFG_DIR"
-install -m755 "$SRC/rgb-config.py" "$CFG_DIR/rgb-config.py"
-python3 "$CFG_DIR/rgb-config.py" || echo "  [aviso] falha ao gerar a configuracao do OpenRGB"
+mkdir -p "$CFG_DIR" "$LIB" "$HOME/.local/bin"
+rm -f "$CFG_DIR/rgb-config.py"                      # versao antiga ficava aqui
+install -m644 "$SRC/rgbsdk.py" "$SRC/rgb_config.py" "$SRC/tray.py" "$LIB/"
+python3 "$LIB/rgb_config.py" || echo "  [aviso] falha ao gerar a configuracao do OpenRGB"
 
 # ---------------------------------------------------------------------------
 # Inicializacao
 # ---------------------------------------------------------------------------
 echo "=== Inicializacao: openrgb-gabinete + autostart ==="
-mkdir -p "$LIB" "$HOME/.local/bin"
-install -m644 "$SRC/rgbsdk.py" "$LIB/"
-install -m755 "$SRC/openrgb-gabinete" "$SRC/dota-rgb" "$SRC/dota-setup.py" "$LIB/"
+install -m755 "$SRC/openrgb-gabinete" "$SRC/dota-rgb" "$SRC/dota-setup.py" "$SRC/rgb-casa" "$LIB/"
 rm -f "$LAUNCHER"                                   # versao antiga era um arquivo solto
 ln -sf "$LIB/openrgb-gabinete" "$LAUNCHER"
 ln -sf "$LIB/dota-rgb" "$DOTA_BIN"
+ln -sf "$LIB/rgb-casa" "$UI_BIN"
 rm -f "$HOME/.config/autostart/OpenRGB.desktop"     # autostart proprio do OpenRGB
 mkdir -p "$(dirname "$AUTOSTART")"
 cat > "$AUTOSTART" <<EOF
@@ -164,6 +173,33 @@ Exec=${LAUNCHER}
 Icon=OpenRGB
 X-KDE-autostart-after=panel
 EOF
+
+# ---------------------------------------------------------------------------
+# rgb-casa: janela + icone + bandeja
+# ---------------------------------------------------------------------------
+echo "=== rgb-casa: janela, icone e bandeja ==="
+install -Dm644 "$SRC/icons/hicolor/scalable/apps/rgb-casa.svg" "$ICON_DIR/rgb-casa.svg"
+gtk-update-icon-cache -q -t "$HOME/.local/share/icons/hicolor" 2>/dev/null || true
+mkdir -p "$(dirname "$UI_DESKTOP")"
+cat > "$UI_DESKTOP" <<EOF
+[Desktop Entry]
+Type=Application
+Name=RGB de casa
+Comment=Efeitos de LED do gabinete, teclado e fita
+Exec=${UI_BIN}
+Icon=rgb-casa
+Categories=Settings;HardwareSettings;
+StartupWMClass=br.com.jurandir.RgbCasa
+EOF
+cat > "$UI_AUTOSTART" <<EOF
+[Desktop Entry]
+Type=Application
+Name=RGB de casa (bandeja)
+Exec=${UI_BIN} --tray
+Icon=rgb-casa
+X-KDE-autostart-after=panel
+EOF
+update-desktop-database -q "$(dirname "$UI_DESKTOP")" 2>/dev/null || true
 
 # ---------------------------------------------------------------------------
 # Dota 2
@@ -185,12 +221,22 @@ RestartSec=5
 WantedBy=default.target
 EOF
 systemctl --user daemon-reload
-systemctl --user enable dota-rgb.service
-systemctl --user restart dota-rgb.service
+# respeita o liga/desliga do modo Dota escolhido no rgb-casa
+DOTA_ON=$(python3 -c "import sys; sys.path.insert(0, '$LIB'); import rgb_config as r; print(int(r.user_config()['dota']))" 2>/dev/null || echo 1)
+if [ "$DOTA_ON" = "1" ]; then
+  systemctl --user enable dota-rgb.service
+  systemctl --user restart dota-rgb.service
+else
+  systemctl --user disable --now dota-rgb.service
+  echo "  modo Dota desligado no rgb-casa"
+fi
 
 if [ -n "${WAYLAND_DISPLAY:-}${DISPLAY:-}" ]; then
   setsid "$LAUNCHER" >/dev/null 2>&1 < /dev/null &
-  echo "  OpenRGB iniciado"
+  pkill -f "^python3 .*/rgb-casa" 2>/dev/null          # versao nova do rgb-casa
+  sleep 1
+  setsid "$UI_BIN" --tray >/dev/null 2>&1 < /dev/null &
+  echo "  OpenRGB e rgb-casa (bandeja) iniciados"
 fi
 
 echo ""
@@ -198,6 +244,6 @@ echo "======================================"
 echo " Concluido."
 echo " O OpenRGB abre sozinho no login (bandeja), com os efeitos de audio."
 echo " Com o Dota 2 aberto, o perfil muda sozinho para o do jogo."
-echo " Para ajustar efeitos: edite leds/rgb-config.py e rode este script de novo."
+echo " Para trocar os efeitos: RGB de casa (menu ou bandeja)."
 echo " Para desfazer: ./leds.sh --remover"
 echo "======================================"

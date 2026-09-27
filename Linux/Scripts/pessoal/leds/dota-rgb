@@ -29,6 +29,7 @@ from colorsys import hsv_to_rgb
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 
 sys.path.insert(0, os.path.dirname(os.path.realpath(__file__)))
+import rgb_config  # noqa: E402
 from rgbsdk import SDK  # noqa: E402
 
 GSI_ADDR = ("127.0.0.1", 3000)
@@ -259,7 +260,12 @@ def main():
             if running != active:
                 try:
                     sdk = sdk or SDK("dota-rgb")
-                    sdk.load_profile(PROFILE_GAME if running else PROFILE_NORMAL)
+                    name = PROFILE_GAME if running else PROFILE_NORMAL
+                    sdk.load_profile(name)
+                    if rgb_config.uses_screen(rgb_config.user_config()):
+                        # o Ambient pediu um token novo ao portal: salva no perfil
+                        threading.Thread(target=rgb_config.persist_screen_token,
+                                         args=(name,), daemon=True).start()
                     active = running
                     if running:
                         time.sleep(1)                   # plugin parando os efeitos

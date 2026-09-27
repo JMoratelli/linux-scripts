@@ -17,6 +17,7 @@ import sys
 import time
 
 sys.path.insert(0, os.path.dirname(os.path.realpath(__file__)))
+import rgb_config  # noqa: E402
 from rgbsdk import SDK  # noqa: E402
 
 PROFILE = os.path.expanduser("~/.config/OpenRGB/profiles/Gabinete.json")
@@ -108,6 +109,9 @@ if __name__ == "__main__":
     proc = subprocess.Popen(["openrgb", "--startminimized", "--server"])
     try:
         fix_zone_sizes()
+        if rgb_config.uses_screen(rgb_config.user_config()):
+            # cada inicio do efeito de tela gasta o token do portal: salva o novo
+            rgb_config.persist_screen_token(rgb_config.PROFILE, delay=20)
     except Exception as e:                        # nunca derrubar o OpenRGB por isso
-        log(f"falha ao conferir as zonas: {e}")
+        log(f"falha ao conferir as zonas/token da tela: {e}")
     sys.exit(proc.wait())

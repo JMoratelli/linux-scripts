@@ -28,3 +28,8 @@
 - `pessoal/perifericos.sh` roda como root (sudo sozinho); `pessoal/leds.sh`
   roda como usuário (configuração do OpenRGB e do PipeWire ficam no home) e só
   usa sudo para instalar pacotes.
+- Testes automáticos de `pessoal/` ficam em `Linux/Scripts/pessoal/tests/` e
+  rodam antes de todo push: `cd Linux/Scripts/pessoal/tests && python3 -m
+  unittest`. Eles nunca tocam na configuração real (pastas temporárias e um
+  OpenRGB falso); os de interface precisam de sessão gráfica e são pulados sem
+  ela.

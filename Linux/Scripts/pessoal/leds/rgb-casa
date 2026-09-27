@@ -1,0 +1,352 @@
+#!/usr/bin/env python3
+"""rgb-casa: interface simples para os efeitos de LED do gabinete.
+
+Os efeitos rodam no OpenRGB (Effects Plugin); esta janela so escolhe o efeito
+de cada zona. Cada mudanca e aplicada em segundo plano (a janela nunca trava):
+grava ~/.config/rgb-casa/config.json, gera os perfis Gabinete/Dota
+(rgb_config.py) e manda o OpenRGB recarregar o perfil ativo.
+
+Fica na bandeja do KDE; fechar a janela so a esconde.
+  rgb-casa           abre a janela
+  rgb-casa --tray    inicia so na bandeja (autostart)
+"""
+import copy
+import os
+import subprocess
+import sys
+import threading
+
+import gi
+
+gi.require_version("Gtk", "4.0")
+gi.require_version("Adw", "1")
+from gi.repository import Adw, Gdk, GLib, Gtk  # noqa: E402
+
+sys.path.insert(0, os.path.dirname(os.path.realpath(__file__)))
+import rgb_config as rc  # noqa: E402
+from tray import Tray  # noqa: E402
+
+APP_ID = "br.com.jurandir.RgbCasa"
+ICON = "rgb-casa"
+APPLY_DELAY_MS = 600          # junta as mudancas (arrastar um controle) antes de aplicar
+SETTLE_MS = 1500              # o plugin recria os efeitos depois do pedido; sem aviso de fim
+GROUP_LABELS = {"audio": "Som", "tela": "Tela", "ambiente": "Ambiente"}
+
+
+class Applier:
+    """Aplica a configuracao numa thread; se chegarem varias mudancas durante
+    uma aplicacao, so a ultima e aplicada depois."""
+
+    def __init__(self, done):
+        self.done = done                                  # chamada na thread da interface
+        self.lock = threading.Lock()
+        self.pending = None
+        self.busy = False
+
+    def submit(self, cfg):
+        with self.lock:
+            self.pending = copy.deepcopy(cfg)
+            if self.busy:
+                return
+            self.busy = True
+        threading.Thread(target=self._run, daemon=True).start()
+
+    def _run(self):
+        while True:
+            with self.lock:
+                cfg, self.pending = self.pending, None
+                if cfg is None:
+                    self.busy = False
+                    return
+            try:
+                ok = rc.apply(cfg)
+            except Exception as e:                        # nunca derrubar a janela
+                ok = e
+            GLib.idle_add(self.done, ok)
+
+
+def slider_row(title, lo, hi, value, on_change, fmt=None):
+    row = Adw.ActionRow(title=title)
+    scale = Gtk.Scale.new_with_range(Gtk.Orientation.HORIZONTAL, lo, hi, 1)
+    scale.set_value(value)
+    scale.set_size_request(220, -1)                       # largura fixa: controles alinhados
+    scale.set_draw_value(True)
+    scale.set_value_pos(Gtk.PositionType.LEFT)
+    if fmt:
+        scale.set_format_value_func(lambda _s, v: fmt(v))
+    scale.connect("value-changed", lambda s: on_change(int(s.get_value())))
+    # a rodinha do mouse rola a pagina, nao mexe no controle
+    wheel = Gtk.EventControllerScroll.new(Gtk.EventControllerScrollFlags.VERTICAL)
+    wheel.set_propagation_phase(Gtk.PropagationPhase.CAPTURE)
+    wheel.connect("scroll", _scroll_page, scale)
+    scale.add_controller(wheel)
+    row.add_suffix(scale)
+    return row, scale
+
+
+def _scroll_page(_ctrl, _dx, dy, widget):
+    page = widget.get_ancestor(Gtk.ScrolledWindow)
+    if page:
+        adj = page.get_vadjustment()
+        adj.set_value(adj.get_value() + dy * 60)
+    return True                                           # o controle nao recebe a rolagem
+
+
+class Swatch(Gtk.DrawingArea):
+    """Quadradinho com a cor escolhida."""
+
+    def __init__(self):
+        super().__init__()
+        self.set_content_width(22)
+        self.set_content_height(22)
+        self.set_valign(Gtk.Align.CENTER)
+        self.rgb = (1, 0, 0)
+        self.set_draw_func(self._draw)
+
+    def set_hue(self, hue):
+        import colorsys
+        self.rgb = colorsys.hsv_to_rgb((hue % 360) / 360, 1, 1)
+        self.queue_draw()
+
+    def _draw(self, _area, cr, w, h):
+        cr.set_source_rgb(*self.rgb)
+        cr.rectangle(0, 0, w, h)
+        cr.fill()
+
+
+class ZoneRow:
+    """Linha expansivel de uma zona: efeito, faixa, cor, velocidade e brilho."""
+
+    def __init__(self, zid, label, cfg, changed):
+        self.zcfg = cfg["zones"][zid]
+        self.changed = changed
+        order = ("audio", "tela", "ambiente")
+        self.effects = sorted(rc.CATALOG, key=lambda e: order.index(rc.CATALOG[e][1]))
+        self.bands = list(rc.BANDS)
+
+        self.expander = Adw.ExpanderRow(title=label)
+        eff = self.zcfg.get("effect", "apagado")
+        self.effect_row = Adw.ComboRow(title="Efeito")
+        self.effect_row.set_model(Gtk.StringList.new(
+            [f"{GROUP_LABELS[rc.CATALOG[e][1]]}: {rc.CATALOG[e][0]}" for e in self.effects]))
+        self.effect_row.set_selected(self.effects.index(eff) if eff in self.effects else 0)
+        self.effect_row.connect("notify::selected", self._effect_changed)
+
+        self.band_row = Adw.ComboRow(title="Faixa do som")
+        self.band_row.set_model(Gtk.StringList.new([rc.BAND_LABELS[b] for b in self.bands]))
+        band = self.zcfg.get("band", "tudo")
+        self.band_row.set_selected(self.bands.index(band) if band in self.bands else 3)
+        self.band_row.connect("notify::selected",
+                              lambda r, _p: self._set("band", self.bands[r.get_selected()]))
+
+        self.swatch = Swatch()
+        self.swatch.set_hue(self.zcfg.get("hue", 270))
+        self.hue_row, _ = slider_row("Cor", 0, 359, self.zcfg.get("hue", 270), self._hue_changed,
+                                     lambda v: f"{int(v)}°")
+        self.hue_row.add_prefix(self.swatch)
+        self.spread_row, _ = slider_row("Variação de cor", 0, 360, self.zcfg.get("hue_spread", 90),
+                                        lambda v: self._set("hue_spread", v), lambda v: f"{int(v)}°")
+        self.speed_row, _ = slider_row("Velocidade", 0, 100, self.zcfg.get("speed", 50),
+                                       lambda v: self._set("speed", v), lambda v: f"{int(v)}%")
+        self.bright_row, _ = slider_row("Brilho", 0, 100, self.zcfg.get("brightness", 100),
+                                        lambda v: self._set("brightness", v), lambda v: f"{int(v)}%")
+        for row in (self.effect_row, self.band_row, self.hue_row, self.spread_row,
+                    self.speed_row, self.bright_row):
+            self.expander.add_row(row)
+        self._refresh()
+
+    def _set(self, key, value):
+        if self.zcfg.get(key) != value:
+            self.zcfg[key] = value
+            self.changed()
+
+    def _hue_changed(self, value):
+        self.swatch.set_hue(value)
+        self._set("hue", value)
+
+    def _effect_changed(self, row, _param):
+        self.zcfg["effect"] = self.effects[row.get_selected()]
+        self._refresh()
+        self.changed()
+
+    def _refresh(self):
+        eff = self.zcfg.get("effect", "apagado")
+        label, _group, params = rc.CATALOG.get(eff, rc.CATALOG["apagado"])
+        self.expander.set_subtitle(label)
+        self.band_row.set_visible("band" in params)
+        self.hue_row.set_visible("hue" in params)
+        self.spread_row.set_visible("hue_spread" in params)
+        self.speed_row.set_visible("speed" in params)
+        self.bright_row.set_visible(eff != "apagado")
+
+
+class Window(Adw.ApplicationWindow):
+    def __init__(self, app):
+        super().__init__(application=app, title="RGB de casa", default_width=480, default_height=680)
+        self.set_size_request(360, 400)
+        self.app = app
+        self.cfg = app.cfg
+        self.timer = None
+
+        self.toasts = Adw.ToastOverlay()
+        view = Adw.ToolbarView()
+        header = Adw.HeaderBar()
+        self.spinner = Adw.Spinner(visible=False)
+        header.pack_end(self.spinner)
+        view.add_top_bar(header)
+        self.banner = Adw.Banner(title="Aplicando nos LEDs…")
+        view.add_top_bar(self.banner)
+        self.settle = None
+        page = Adw.PreferencesPage()
+
+        zones = Adw.PreferencesGroup(title="Zonas", description="As mudanças aparecem nos LEDs na hora.")
+        self.rows = []
+        for zid, label, _ in rc.ZONES:
+            row = ZoneRow(zid, label, self.cfg, self.schedule_apply)
+            row.expander.connect("notify::expanded", self._accordion)
+            zones.add(row.expander)
+            self.rows.append(row)
+        page.add(zones)
+
+        dota = Adw.PreferencesGroup(title="Dota 2",
+                                    description="Com o jogo aberto, teclado e WLED mostram habilidades e vida.")
+        self.dota_switch = Adw.SwitchRow(title="Modo Dota", active=self.cfg.get("dota", True))
+        self.dota_switch.connect("notify::active", lambda r, _p: app.set_dota(r.get_active()))
+        dota.add(self.dota_switch)
+        page.add(dota)
+
+        view.set_content(page)
+        self.toasts.set_child(view)
+        self.set_content(self.toasts)
+        self.connect("close-request", self._hide)
+
+    def _accordion(self, expander, _param):
+        """Menu tipo acordeao: abrir uma zona fecha as outras."""
+        if expander.get_expanded():
+            for row in self.rows:
+                if row.expander is not expander and row.expander.get_expanded():
+                    row.expander.set_expanded(False)
+
+    def _hide(self, _win):
+        self.set_visible(False)                           # continua na bandeja
+        return True
+
+    def set_busy(self, busy):
+        self.banner.set_revealed(busy)
+        self.spinner.set_visible(busy)
+
+    def schedule_apply(self):
+        self.set_busy(True)                               # mostra na hora que mexeu
+        if self.settle:
+            GLib.source_remove(self.settle)
+            self.settle = None
+        if self.timer:
+            GLib.source_remove(self.timer)
+        self.timer = GLib.timeout_add(APPLY_DELAY_MS, self._apply)
+
+    def applied(self, text):
+        """Pedido feito ao OpenRGB: espera o plugin recriar os efeitos."""
+        if self.timer:                                    # ja tem outra mudanca na fila
+            return
+        if self.settle:
+            GLib.source_remove(self.settle)
+        self.settle = GLib.timeout_add(SETTLE_MS, self._settled, text)
+
+    def _settled(self, text):
+        self.settle = None
+        if not self.timer and not self.app.applier.busy:
+            self.set_busy(False)
+            self.toast(text)
+        return GLib.SOURCE_REMOVE
+
+    def _apply(self):
+        self.timer = None
+        self.app.applier.submit(self.cfg)
+        return GLib.SOURCE_REMOVE
+
+    def toast(self, text):
+        self.toasts.add_toast(Adw.Toast(title=text, timeout=2))
+
+
+class App(Adw.Application):
+    def __init__(self, start_hidden):
+        super().__init__(application_id=APP_ID)
+        self.start_hidden = start_hidden
+        self.cfg = rc.user_config()
+        self.window = None
+        self.tray = None
+        self.applier = Applier(self._applied)
+
+    def do_startup(self):
+        Adw.Application.do_startup(self)
+        # o tema de icones do sistema pode nao ter os simbolicos do libadwaita
+        # (ex.: Tela): o app usa o Adwaita para os proprios icones
+        Gtk.Settings.get_default().set_property("gtk-icon-theme-name", "Adwaita")
+        theme = Gtk.IconTheme.get_for_display(Gdk.Display.get_default())
+        theme.add_search_path(os.path.join(os.path.dirname(os.path.realpath(__file__)), "icons"))
+        Gtk.Window.set_default_icon_name(ICON)
+        self.hold()                                       # vive na bandeja mesmo sem janela
+        self.tray = Tray(APP_ID, "RGB de casa", ICON, self.toggle_window, [
+            (1, "Abrir", self.show_window, None),
+            (2, "Modo Dota", lambda: self.set_dota(not self.cfg.get("dota", True)),
+             lambda: self.cfg.get("dota", True)),
+            (3, None, None, None),
+            (4, "Sair", self.quit, None),
+        ])
+
+    def do_activate(self):
+        if self.window is None:
+            self.window = Window(self)
+            if self.start_hidden:
+                self.start_hidden = False
+                return
+        self.show_window()
+
+    def show_window(self):
+        if self.window is None:
+            self.window = Window(self)
+        self.window.set_visible(True)
+        self.window.present()
+
+    def toggle_window(self):
+        if self.window and self.window.get_visible():
+            self.window.set_visible(False)
+        else:
+            self.show_window()
+
+    def set_dota(self, on):
+        if self.cfg.get("dota", True) == on:
+            return
+        self.cfg["dota"] = on
+        rc.save_user_config(self.cfg)
+        threading.Thread(target=subprocess.run, daemon=True, kwargs={
+            "args": ["systemctl", "--user", "enable" if on else "disable", "--now", "dota-rgb.service"],
+            "capture_output": True}).start()
+        if self.window and self.window.dota_switch.get_active() != on:
+            self.window.dota_switch.set_active(on)
+        if self.tray:
+            self.tray.refresh()
+        if self.window:
+            self.window.toast("Modo Dota ligado" if on else "Modo Dota desligado")
+
+    def _applied(self, result):
+        if self.window:
+            if result is True:
+                self.window.applied("Aplicado")
+            elif result is False:
+                self.window.set_busy(False)
+                self.window.toast("Salvo; o OpenRGB está fechado e aplica quando abrir")
+            else:
+                self.window.set_busy(False)
+                self.window.toast(f"Erro ao aplicar: {result}")
+        return GLib.SOURCE_REMOVE
+
+
+def main():
+    hidden = "--tray" in sys.argv
+    argv = [a for a in sys.argv if a != "--tray"]
+    return App(hidden).run(argv)
+
+
+if __name__ == "__main__":
+    sys.exit(main())

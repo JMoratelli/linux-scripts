@@ -1,0 +1,64 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 64 64" width="64" height="64">
+  <defs>
+    <linearGradient id="painel" x1="6" y1="6" x2="58" y2="58" gradientUnits="userSpaceOnUse">
+      <stop offset="0" stop-color="#525d7c"/>
+      <stop offset="1" stop-color="#1c2436"/>
+    </linearGradient>
+    <linearGradient id="cubo" x1="26" y1="26" x2="38" y2="38" gradientUnits="userSpaceOnUse">
+      <stop offset="0" stop-color="#465076"/>
+      <stop offset="1" stop-color="#1c2436"/>
+    </linearGradient>
+    <clipPath id="clipPainel">
+      <rect x="6" y="6" width="52" height="52" rx="12"/>
+    </clipPath>
+    <filter id="sombra" x="-40%" y="-40%" width="180%" height="180%">
+      <feGaussianBlur in="SourceAlpha" stdDeviation="1.8" result="borrado"/>
+      <feOffset in="borrado" dx="0" dy="2" result="deslocado"/>
+      <feComponentTransfer in="deslocado" result="sombra">
+        <feFuncA type="linear" slope="0.45"/>
+      </feComponentTransfer>
+      <feMerge>
+        <feMergeNode in="sombra"/>
+        <feMergeNode in="SourceGraphic"/>
+      </feMerge>
+    </filter>
+    <filter id="brilho" x="-50%" y="-50%" width="200%" height="200%">
+      <feGaussianBlur stdDeviation="2.2"/>
+    </filter>
+  </defs>
+
+  <!-- painel: faceta clara no canto e escura no oposto, como no Acessos -->
+  <g filter="url(#sombra)">
+    <rect x="6" y="6" width="52" height="52" rx="12" fill="url(#painel)"/>
+    <polygon points="6,6 40,6 6,40" fill="#ffffff" opacity=".12" clip-path="url(#clipPainel)"/>
+    <polygon points="58,58 30,58 58,30" fill="#000000" opacity=".2" clip-path="url(#clipPainel)"/>
+    <rect x="6" y="6" width="52" height="52" rx="12" fill="none" stroke="#b3a8ff" stroke-width="2.5"/>
+  </g>
+
+  <!-- aro de LED do fan: brilho difuso por baixo e seis cores por cima.
+       Cada arco e o mesmo circulo com traco de 1/6 da volta, girado 60 graus -->
+  <g transform="rotate(-90 32 32)" fill="none" stroke-width="5">
+    <g filter="url(#brilho)" opacity=".75">
+      <circle cx="32" cy="32" r="16" stroke="#ff4d5e" stroke-dasharray="16.76 83.78"/>
+      <circle cx="32" cy="32" r="16" stroke="#ffd24d" stroke-dasharray="16.76 83.78" transform="rotate(60 32 32)"/>
+      <circle cx="32" cy="32" r="16" stroke="#79f0c4" stroke-dasharray="16.76 83.78" transform="rotate(120 32 32)"/>
+      <circle cx="32" cy="32" r="16" stroke="#4dd8ff" stroke-dasharray="16.76 83.78" transform="rotate(180 32 32)"/>
+      <circle cx="32" cy="32" r="16" stroke="#6b7dff" stroke-dasharray="16.76 83.78" transform="rotate(240 32 32)"/>
+      <circle cx="32" cy="32" r="16" stroke="#e06bff" stroke-dasharray="16.76 83.78" transform="rotate(300 32 32)"/>
+    </g>
+    <circle cx="32" cy="32" r="16" stroke="#ff4d5e" stroke-dasharray="16.76 83.78"/>
+    <circle cx="32" cy="32" r="16" stroke="#ffd24d" stroke-dasharray="16.76 83.78" transform="rotate(60 32 32)"/>
+    <circle cx="32" cy="32" r="16" stroke="#79f0c4" stroke-dasharray="16.76 83.78" transform="rotate(120 32 32)"/>
+    <circle cx="32" cy="32" r="16" stroke="#4dd8ff" stroke-dasharray="16.76 83.78" transform="rotate(180 32 32)"/>
+    <circle cx="32" cy="32" r="16" stroke="#6b7dff" stroke-dasharray="16.76 83.78" transform="rotate(240 32 32)"/>
+    <circle cx="32" cy="32" r="16" stroke="#e06bff" stroke-dasharray="16.76 83.78" transform="rotate(300 32 32)"/>
+  </g>
+
+  <!-- pas e cubo do fan, no verde-menta de destaque do Acessos -->
+  <g stroke="#79f0c4" stroke-width="3" stroke-linecap="round" fill="none" opacity=".9">
+    <path d="M32 26C35 22.5 39.5 22.3 42 25"/>
+    <path d="M32 26C35 22.5 39.5 22.3 42 25" transform="rotate(120 32 32)"/>
+    <path d="M32 26C35 22.5 39.5 22.3 42 25" transform="rotate(240 32 32)"/>
+  </g>
+  <circle cx="32" cy="32" r="6" fill="url(#cubo)" stroke="#c7cee0" stroke-width="1.6"/>
+</svg>
