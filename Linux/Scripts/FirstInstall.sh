@@ -375,6 +375,24 @@ run_debian() {
 }
 
 # ---------------------------------------------------------------------------
+# Repositorio de instrucoes do VS Code (github.com/JMoratelli/VSCode): clona
+# em ~/Projetos ou atualiza se ja existir, para a documentacao ficar na maquina.
+# ---------------------------------------------------------------------------
+PROJETOS_DIR="$HOME/Projetos"
+VSCODE_DOCS_REPO="https://github.com/JMoratelli/VSCode.git"
+
+sync_vscode_docs() {
+  echo "=== VS Code: instrucoes em $PROJETOS_DIR/VSCode ==="
+  local dest="$PROJETOS_DIR/VSCode"
+  mkdir -p "$PROJETOS_DIR"
+  if [ -d "$dest/.git" ]; then
+    git -C "$dest" pull --ff-only -q || echo "  [aviso] nao consegui atualizar $dest"
+  else
+    git clone -q "$VSCODE_DOCS_REPO" "$dest" || echo "  [aviso] nao consegui clonar $VSCODE_DOCS_REPO"
+  fi
+}
+
+# ---------------------------------------------------------------------------
 # VS Code: configuracoes de usuario seguindo github.com/JMoratelli/VSCode
 # (extensions.md, git-settings.md, editor-performance.md). Mescla no
 # settings.json existente, sem apagar o que ja estiver la.
@@ -453,6 +471,7 @@ case "$DISTRO" in
   debian) run_debian ;;
 esac
 
+sync_vscode_docs
 apply_vscode_settings
 setup_github_cli
 run_extra_scripts
