@@ -360,11 +360,29 @@ run_debian() {
   install_vscode_extensions
 }
 
+# ---------------------------------------------------------------------------
+# Demais scripts da pasta (perifericos.sh etc.). Cada um e independente e
+# roda mesmo se o anterior falhar.
+# ---------------------------------------------------------------------------
+run_extra_scripts() {
+  local dir self script
+  dir=$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)
+  self=$(basename "${BASH_SOURCE[0]}")
+  for script in "$dir"/*.sh; do
+    [ "$(basename "$script")" = "$self" ] && continue
+    echo ""
+    echo "=== Executando $(basename "$script") ==="
+    bash "$script" || echo "  [aviso] $(basename "$script") terminou com erro"
+  done
+}
+
 case "$DISTRO" in
   cachy)  run_cachy ;;
   fedora) run_fedora ;;
   debian) run_debian ;;
 esac
+
+run_extra_scripts
 
 echo ""
 echo "======================================"
