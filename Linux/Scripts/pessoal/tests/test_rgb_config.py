@@ -105,6 +105,38 @@ class TestPerfis(Base):
         self.assertEqual(len(ambient), 1)
         self.assertEqual(len(ambient[0]["ControllerZones"]), 3)
 
+    def test_livre_nao_manda_nada(self):
+        cfg = rc.user_config()
+        cfg["zones"]["wled"] = {"effect": "livre"}
+        nomes = {z["name"] for e in rc.effects_for(cfg) for z in e["ControllerZones"]}
+        self.assertNotIn(rc.WLED["name"], nomes)
+        self.assertIn(rc.KEYBOARD["name"], nomes)
+
+    def test_solta_a_wled_pela_api(self):
+        import threading
+        from http.server import BaseHTTPRequestHandler, HTTPServer
+        pedidos = []
+
+        class H(BaseHTTPRequestHandler):
+            def do_POST(self):
+                pedidos.append((self.path, self.rfile.read(int(self.headers["Content-Length"]))))
+                self.send_response(200)
+                self.end_headers()
+                self.wfile.write(b'{"success":true}')
+
+            def log_message(self, *a):
+                pass
+
+        srv = HTTPServer(("127.0.0.1", 0), H)
+        threading.Thread(target=srv.serve_forever, daemon=True).start()
+        try:
+            ip = f"127.0.0.1:{srv.server_address[1]}"
+            self.assertEqual(rc.release_wled([ip]), [ip])
+            self.assertEqual(pedidos, [("/json/state", b'{"live":false}')])
+            self.assertEqual(rc.release_wled(["127.0.0.1:1"]), [])   # fora do ar: sem erro
+        finally:
+            srv.shutdown()
+
     def test_token_da_tela_preservado(self):
         cfg = rc.user_config()
         cfg["zones"]["wled"] = {"effect": "tela"}

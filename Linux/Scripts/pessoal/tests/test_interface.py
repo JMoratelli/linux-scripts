@@ -40,13 +40,13 @@ class TestZona(unittest.TestCase):
             self.assertEqual(row.hue_row.get_visible(), "hue" in params, eff)
             self.assertEqual(row.spread_row.get_visible(), "hue_spread" in params, eff)
             self.assertEqual(row.speed_row.get_visible(), "speed" in params, eff)
-            self.assertEqual(row.bright_row.get_visible(), eff != "apagado", eff)
+            self.assertEqual(row.bright_row.get_visible(), eff not in ("apagado", "livre"), eff)
         self.assertGreater(self.changes, 0)
 
     def test_efeitos_agrupados_som_tela_ambiente(self):
         row = ui.ZoneRow("wled", "WLED", self.cfg, self.changed)
         grupos = [ui.rc.CATALOG[e][1] for e in row.effects]
-        self.assertEqual(grupos, sorted(grupos, key=("audio", "tela", "ambiente").index))
+        self.assertEqual(grupos, sorted(grupos, key=("audio", "tela", "ambiente", "livre").index))
 
     def test_efeito_salvo_desconhecido_nao_quebra(self):
         self.cfg["zones"]["gpu"]["effect"] = "removido"

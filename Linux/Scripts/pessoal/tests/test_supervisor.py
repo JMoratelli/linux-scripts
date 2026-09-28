@@ -48,5 +48,24 @@ class TestSupervisor(unittest.TestCase):
         self.assertEqual(f.runs, 21)
 
 
+class TestDesligar(unittest.TestCase):
+    def test_encerra_o_openrgb_sem_reabrir(self):
+        import subprocess
+        proc = subprocess.Popen(["sleep", "30"])
+        launcher.stop_child(proc)
+        self.assertIsNotNone(proc.poll())            # encerrou
+
+    def test_forca_se_nao_sair(self):
+        import subprocess
+        proc = subprocess.Popen(["sh", "-c", "trap '' TERM; sleep 30"])
+        old = launcher.STOP_TIMEOUT
+        launcher.STOP_TIMEOUT = 0.5
+        try:
+            launcher.stop_child(proc)
+        finally:
+            launcher.STOP_TIMEOUT = old
+        self.assertIsNotNone(proc.poll())
+
+
 if __name__ == "__main__":
     unittest.main()

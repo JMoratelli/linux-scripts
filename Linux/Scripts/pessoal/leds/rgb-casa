@@ -6,15 +6,19 @@ de cada zona. Cada mudanca e aplicada em segundo plano (a janela nunca trava):
 grava ~/.config/rgb-casa/config.json, gera os perfis Gabinete/Dota
 (rgb_config.py) e manda o OpenRGB recarregar o perfil ativo.
 
-Fica na bandeja do KDE; fechar a janela so a esconde.
+Abrir o rgb-casa sobe tudo que os efeitos precisam (OpenRGB escondido pelo
+openrgb-gabinete e o dota-rgb); "Sair" na bandeja apaga os LEDs e encerra
+tudo. Fechar a janela so a esconde na bandeja.
   rgb-casa           abre a janela
   rgb-casa --tray    inicia so na bandeja (autostart)
 """
 import copy
 import os
+import signal
 import subprocess
 import sys
 import threading
+import time
 
 import gi
 
@@ -30,7 +34,90 @@ APP_ID = "br.com.jurandir.RgbCasa"
 ICON = "rgb-casa"
 APPLY_DELAY_MS = 600          # junta as mudancas (arrastar um controle) antes de aplicar
 SETTLE_MS = 1500              # o plugin recria os efeitos depois do pedido; sem aviso de fim
-GROUP_LABELS = {"audio": "Som", "tela": "Tela", "ambiente": "Ambiente"}
+GROUP_LABELS = {"audio": "Som", "tela": "Tela", "ambiente": "Ambiente", "livre": "Livre"}
+
+
+LIB = os.path.dirname(os.path.realpath(__file__))
+LAUNCHER = os.path.join(LIB, "openrgb-gabinete")
+
+
+def process_pids(script):
+    """PIDs de "python3 .../<script>" (le /proc; nao depende do pgrep)."""
+    pids = []
+    for pid in os.listdir("/proc"):
+        if not pid.isdigit():
+            continue
+        try:
+            with open(f"/proc/{pid}/cmdline", "rb") as f:
+                argv = f.read().split(b"\0")
+        except OSError:
+            continue
+        if len(argv) > 1 and b"python" in os.path.basename(argv[0]) and \
+                os.path.basename(argv[1]).decode(errors="replace") == script:
+            pids.append(int(pid))
+    return pids
+
+
+def openrgb_pids():
+    pids = []
+    for pid in os.listdir("/proc"):
+        if pid.isdigit():
+            try:
+                with open(f"/proc/{pid}/comm") as f:
+                    if f.read().strip() == "openrgb":
+                        pids.append(int(pid))
+            except OSError:
+                pass
+    return pids
+
+
+def systemctl_user(*args):
+    subprocess.run(["systemctl", "--user", *args], capture_output=True)
+
+
+class Engine:
+    """Liga e desliga o que os efeitos precisam."""
+
+    def __init__(self, launcher=LAUNCHER):
+        self.launcher = launcher
+
+    def start(self, dota):
+        if not process_pids(os.path.basename(self.launcher)):
+            subprocess.Popen([self.launcher], start_new_session=True, stdin=subprocess.DEVNULL,
+                             stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+        if dota:
+            systemctl_user("start", "dota-rgb.service")
+
+    @staticmethod
+    def blackout():
+        """Para os efeitos (perfil sem efeitos) e apaga os LEDs. A WLED nao e
+        apagada: ela e solta depois (volta aos efeitos dela)."""
+        from rgbsdk import SDK
+        rc.off_profile_json()                             # garante o perfil em disco
+        sdk = SDK("rgb-casa-desligar")
+        sdk.load_profile(rc.PROFILE_OFF)
+        time.sleep(1.0)                                   # o plugin parando os efeitos
+        for c in sdk.controllers():
+            if c.num_leds and c.name != rc.WLED["name"]:
+                sdk.custom_mode(c.index)
+                sdk.update_leds(c.index, [(0, 0, 0)] * c.num_leds)
+        time.sleep(0.3)
+        sdk.close()
+
+    def stop(self, timeout=15):
+        systemctl_user("stop", "dota-rgb.service")
+        try:
+            self.blackout()
+        except OSError:
+            pass                                          # OpenRGB ja fechado
+        for pid in process_pids(os.path.basename(self.launcher)):
+            os.kill(pid, signal.SIGTERM)                  # o supervisor fecha o OpenRGB e sai
+        deadline = time.monotonic() + timeout
+        while openrgb_pids() and time.monotonic() < deadline:
+            time.sleep(0.3)
+        for pid in openrgb_pids():                        # nao saiu a tempo
+            os.kill(pid, signal.SIGKILL)
+        rc.release_wled()                                 # desconexao limpa: WLED com os efeitos dela
 
 
 class Applier:
@@ -120,7 +207,7 @@ class ZoneRow:
     def __init__(self, zid, label, cfg, changed):
         self.zcfg = cfg["zones"][zid]
         self.changed = changed
-        order = ("audio", "tela", "ambiente")
+        order = ("audio", "tela", "ambiente", "livre")
         self.effects = sorted(rc.CATALOG, key=lambda e: order.index(rc.CATALOG[e][1]))
         self.bands = list(rc.BANDS)
 
@@ -177,7 +264,7 @@ class ZoneRow:
         self.hue_row.set_visible("hue" in params)
         self.spread_row.set_visible("hue_spread" in params)
         self.speed_row.set_visible("speed" in params)
-        self.bright_row.set_visible(eff != "apagado")
+        self.bright_row.set_visible(eff not in ("apagado", "livre"))
 
 
 class Window(Adw.ApplicationWindow):
@@ -276,6 +363,8 @@ class App(Adw.Application):
         self.window = None
         self.tray = None
         self.applier = Applier(self._applied)
+        self.engine = Engine()
+        self.stopping = False
 
     def do_startup(self):
         Adw.Application.do_startup(self)
@@ -286,12 +375,14 @@ class App(Adw.Application):
         theme.add_search_path(os.path.join(os.path.dirname(os.path.realpath(__file__)), "icons"))
         Gtk.Window.set_default_icon_name(ICON)
         self.hold()                                       # vive na bandeja mesmo sem janela
+        threading.Thread(target=self.engine.start, args=(self.cfg.get("dota", True),),
+                         daemon=True).start()
         self.tray = Tray(APP_ID, "RGB de casa", ICON, self.toggle_window, [
             (1, "Abrir", self.show_window, None),
             (2, "Modo Dota", lambda: self.set_dota(not self.cfg.get("dota", True)),
              lambda: self.cfg.get("dota", True)),
             (3, None, None, None),
-            (4, "Sair", self.quit, None),
+            (4, "Sair (desliga os LEDs)", self.quit_all, None),
         ])
 
     def do_activate(self):
@@ -314,13 +405,29 @@ class App(Adw.Application):
         else:
             self.show_window()
 
+    def quit_all(self):
+        """Apaga os LEDs, encerra OpenRGB e dota-rgb e fecha o app."""
+        if self.stopping:
+            return
+        self.stopping = True
+        if self.window and self.window.get_visible():
+            self.window.set_busy(True)
+            self.window.banner.set_title("Desligando os LEDs…")
+
+        def work():
+            try:
+                self.engine.stop()
+            finally:
+                GLib.idle_add(self.quit)
+        threading.Thread(target=work, daemon=True).start()
+
     def set_dota(self, on):
         if self.cfg.get("dota", True) == on:
             return
         self.cfg["dota"] = on
         rc.save_user_config(self.cfg)
         threading.Thread(target=subprocess.run, daemon=True, kwargs={
-            "args": ["systemctl", "--user", "enable" if on else "disable", "--now", "dota-rgb.service"],
+            "args": ["systemctl", "--user", "start" if on else "stop", "dota-rgb.service"],
             "capture_output": True}).start()
         if self.window and self.window.dota_switch.get_active() != on:
             self.window.dota_switch.set_active(on)

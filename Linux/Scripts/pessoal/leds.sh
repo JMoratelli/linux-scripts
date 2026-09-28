@@ -15,7 +15,8 @@
 #   - openrgb-gabinete: abre o OpenRGB na bandeja com o servidor ligado,
 #     corrigindo antes o indice da "RGB Audio" no perfil e, depois, o
 #     tamanho das zonas ARGB pelo SDK (fitas nao informam quantos LEDs tem)
-#   - autostart do KDE para o openrgb-gabinete
+#   - autostart do KDE so para o rgb-casa (na bandeja): abrir o rgb-casa sobe
+#     o OpenRGB escondido e o dota-rgb; "Sair" nele apaga os LEDs e encerra tudo
 #   - dota-rgb (servico de usuario): ao abrir o Dota 2 troca para o perfil
 #     "Dota" e pinta teclado e gabinete com o estado da partida (Game State
 #     Integration: habilidades/itens no teclado, vida/mana nos fans, cor do
@@ -63,7 +64,10 @@ UI_AUTOSTART="$HOME/.config/autostart/rgb-casa.desktop"
 ICON_DIR="$HOME/.local/share/icons/hicolor/scalable/apps"
 
 stop_openrgb() {
-  # o OpenRGB regrava a configuracao ao sair; fecha antes de mexer nela
+  # o OpenRGB regrava a configuracao ao sair; fecha antes de mexer nela.
+  # Primeiro o supervisor (openrgb-gabinete), senao ele reabre o OpenRGB.
+  pkill -TERM -f "^python3 .*/openrgb-gabinete" 2>/dev/null
+  sleep 1
   pkill -x openrgb 2>/dev/null || return 0
   for _ in $(seq 15); do
     pgrep -x openrgb >/dev/null || return 0
@@ -111,7 +115,10 @@ fi
 echo "=== Pacotes: OpenRGB, OpenAL, PipeWire/Pulse, Effects Plugin ==="
 if command -v pacman >/dev/null 2>&1; then
   missing=()
-  for pkg in openrgb openal libpulse python python-gobject gtk4 libadwaita adwaita-icon-theme; do
+  # OpenRGB + captura de audio (OpenAL/PipeWire) + janela GTK4 + ferramentas do menu
+  for pkg in openrgb openal libpulse pipewire pipewire-pulse wireplumber \
+             python python-gobject gtk4 libadwaita adwaita-icon-theme \
+             gtk-update-icon-cache desktop-file-utils; do
     pacman -Q "$pkg" >/dev/null 2>&1 || missing+=("$pkg")
   done
   if [ "${#missing[@]}" -gt 0 ]; then
@@ -119,6 +126,16 @@ if command -v pacman >/dev/null 2>&1; then
   fi
   if ! pacman -Q openrgb-plugin-effects >/dev/null 2>&1; then
     AUR_HELPER=$(command -v paru || command -v yay || true)
+    if [ -z "$AUR_HELPER" ]; then
+      # sem ajudante do AUR (rodando fora do FirstInstall): instala o paru
+      sudo pacman -S --needed --noconfirm base-devel git && {
+        tmpdir=$(mktemp -d)
+        git clone https://aur.archlinux.org/paru-bin.git "$tmpdir/paru-bin" && \
+          (cd "$tmpdir/paru-bin" && makepkg -si --noconfirm)
+        rm -rf "$tmpdir"
+      }
+      AUR_HELPER=$(command -v paru || command -v yay || true)
+    fi
     if [ -n "$AUR_HELPER" ]; then
       # compilacao do plugin (Qt) limitada para nao estourar a memoria
       MAKEFLAGS="-j4" "$AUR_HELPER" -S --needed --noconfirm openrgb-plugin-effects || \
@@ -156,23 +173,14 @@ python3 "$LIB/rgb_config.py" || echo "  [aviso] falha ao gerar a configuracao do
 # ---------------------------------------------------------------------------
 # Inicializacao
 # ---------------------------------------------------------------------------
-echo "=== Inicializacao: openrgb-gabinete + autostart ==="
+echo "=== Inicializacao: openrgb-gabinete (o rgb-casa e quem abre) ==="
 install -m755 "$SRC/openrgb-gabinete" "$SRC/dota-rgb" "$SRC/dota-setup.py" "$SRC/rgb-casa" "$LIB/"
 rm -f "$LAUNCHER"                                   # versao antiga era um arquivo solto
 ln -sf "$LIB/openrgb-gabinete" "$LAUNCHER"
 ln -sf "$LIB/dota-rgb" "$DOTA_BIN"
 ln -sf "$LIB/rgb-casa" "$UI_BIN"
-rm -f "$HOME/.config/autostart/OpenRGB.desktop"     # autostart proprio do OpenRGB
-mkdir -p "$(dirname "$AUTOSTART")"
-cat > "$AUTOSTART" <<EOF
-[Desktop Entry]
-Type=Application
-Name=OpenRGB (gabinete)
-Comment=RGB do gabinete reativo ao som
-Exec=${LAUNCHER}
-Icon=OpenRGB
-X-KDE-autostart-after=panel
-EOF
+# o OpenRGB nao tem mais autostart proprio: o rgb-casa abre e fecha ele
+rm -f "$HOME/.config/autostart/OpenRGB.desktop" "$AUTOSTART"
 
 # ---------------------------------------------------------------------------
 # rgb-casa: janela + icone + bandeja
@@ -221,28 +229,20 @@ RestartSec=5
 WantedBy=default.target
 EOF
 systemctl --user daemon-reload
-# respeita o liga/desliga do modo Dota escolhido no rgb-casa
-DOTA_ON=$(python3 -c "import sys; sys.path.insert(0, '$LIB'); import rgb_config as r; print(int(r.user_config()['dota']))" 2>/dev/null || echo 1)
-if [ "$DOTA_ON" = "1" ]; then
-  systemctl --user enable dota-rgb.service
-  systemctl --user restart dota-rgb.service
-else
-  systemctl --user disable --now dota-rgb.service
-  echo "  modo Dota desligado no rgb-casa"
-fi
+# quem liga e desliga o dota-rgb e o rgb-casa (conforme o modo Dota dele)
+systemctl --user disable --now dota-rgb.service 2>/dev/null
 
 if [ -n "${WAYLAND_DISPLAY:-}${DISPLAY:-}" ]; then
-  setsid "$LAUNCHER" >/dev/null 2>&1 < /dev/null &
   pkill -f "^python3 .*/rgb-casa" 2>/dev/null          # versao nova do rgb-casa
   sleep 1
-  setsid "$UI_BIN" --tray >/dev/null 2>&1 < /dev/null &
-  echo "  OpenRGB e rgb-casa (bandeja) iniciados"
+  setsid "$UI_BIN" --tray >/dev/null 2>&1 < /dev/null &   # ele sobe o resto
+  echo "  rgb-casa (bandeja) iniciado; ele abre o OpenRGB escondido"
 fi
 
 echo ""
 echo "======================================"
 echo " Concluido."
-echo " O OpenRGB abre sozinho no login (bandeja), com os efeitos de audio."
+echo " O rgb-casa abre no login (bandeja) e sobe os efeitos; Sair desliga tudo."
 echo " Com o Dota 2 aberto, o perfil muda sozinho para o do jogo."
 echo " Para trocar os efeitos: RGB de casa (menu ou bandeja)."
 echo " Para desfazer: ./leds.sh --remover"

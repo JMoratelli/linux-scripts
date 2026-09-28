@@ -12,10 +12,15 @@
    (corrida entre a thread de um efeito e a desmontagem da captura de
    audio). Se o OpenRGB morrer com erro, abre de novo; se fechar
    normalmente (sair pela bandeja), respeita.
+4. SIGTERM neste processo (o "Sair" do rgb-casa) = desligar de proposito:
+   encerra o OpenRGB e sai sem reabrir.
+5. O OpenRGB roda escondido (plataforma "offscreen" do Qt: sem janela e sem
+   icone na bandeja); quem aparece para o usuario e o rgb-casa.
 """
 import ctypes
 import json
 import os
+import signal
 import subprocess
 import sys
 import time
@@ -109,11 +114,37 @@ def fix_zone_sizes(timeout=90):
 
 
 MAX_RESTARTS, RESTART_WINDOW, RESTART_DELAY = 5, 300, 3
+STOP_TIMEOUT = 10
+
+
+class Stop(Exception):
+    """Pedido de desligar de proposito (SIGTERM)."""
+
+
+def _on_term(*_):
+    raise Stop()
+
+
+def stop_child(proc):
+    """Encerra o OpenRGB: pede com SIGTERM e so forca se nao sair a tempo."""
+    if proc is None or proc.poll() is not None:
+        return
+    proc.terminate()
+    try:
+        proc.wait(STOP_TIMEOUT)
+    except subprocess.TimeoutExpired:
+        proc.kill()
+        proc.wait()
+
+
+CURRENT = {"proc": None}
 
 
 def run_once():
     fix_audio_device()
-    proc = subprocess.Popen(["openrgb", "--startminimized", "--server"])
+    env = dict(os.environ, QT_QPA_PLATFORM="offscreen")
+    proc = subprocess.Popen(["openrgb", "--startminimized", "--server"], env=env)
+    CURRENT["proc"] = proc
     try:
         fix_zone_sizes()
         if rgb_config.uses_screen(rgb_config.user_config()):
@@ -140,5 +171,15 @@ def supervise(run=run_once, sleep=time.sleep, clock=time.monotonic):
         sleep(RESTART_DELAY)
 
 
+def main():
+    signal.signal(signal.SIGTERM, _on_term)
+    try:
+        return supervise()
+    except Stop:
+        stop_child(CURRENT["proc"])
+        log("desligado a pedido")
+        return 0
+
+
 if __name__ == "__main__":
-    sys.exit(supervise())
+    sys.exit(main())

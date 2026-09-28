@@ -114,13 +114,13 @@ if command -v pacman >/dev/null 2>&1; then
   for pkg in $(pacman -Qqo /usr/lib/modules/*/vmlinuz 2>/dev/null | sort -u); do
     headers+=("${pkg}-headers")
   done
-  pacman -S --needed --noconfirm dkms python python-numpy libpulse curl clang lld llvm "${headers[@]}" || \
+  pacman -S --needed --noconfirm dkms python libpulse curl clang lld llvm "${headers[@]}" || \
     echo "  [aviso] falha ao instalar dependencias"
 elif command -v dnf >/dev/null 2>&1; then
-  dnf install -y dkms kernel-devel python3 python3-numpy pulseaudio-utils curl || \
+  dnf install -y dkms kernel-devel python3 pulseaudio-utils curl || \
     echo "  [aviso] falha ao instalar dependencias"
 elif command -v apt >/dev/null 2>&1; then
-  apt install -y dkms "linux-headers-$(uname -r)" python3 python3-numpy pulseaudio-utils curl || \
+  apt install -y dkms "linux-headers-$(uname -r)" python3 pulseaudio-utils curl || \
     echo "  [aviso] falha ao instalar dependencias"
 fi
 

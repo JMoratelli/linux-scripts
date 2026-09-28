@@ -17,6 +17,7 @@ from colorsys import hsv_to_rgb
 
 CFG = os.path.expanduser("~/.config/OpenRGB")
 PROFILE = "Gabinete"
+PROFILE_OFF = "Desligado"   # sem efeitos: usado pelo rgb-casa para apagar tudo ao sair
 PROFILE_DOTA = "Dota"       # teclado e WLED ficam com o dota-rgb; o resto segue o audio
 PLUGIN = "OpenRGB Effects Plugin"
 
@@ -40,16 +41,23 @@ GPU = {
     "description": "Gigabyte RGB Fusion 2 GPU Device", "version": "", "serial": "",
     "location": "I2C: AMDGPU DM i2c OEM bus (/dev/i2c-4), address 0x55",
 }
+# WLED da mesa por E1.31 (universo 1): diferente do DDP do OpenRGB, o E1.31
+# nao tem keepalive, entao sem efeito o PC para de mandar e a WLED volta aos
+# efeitos dela (ex.: audio vindo do celular). A localizacao e a que o OpenRGB
+# monta para esse dispositivo.
 WLED = {
-    "name": "WLED Mesa", "vendor": "", "description": "Distributed Display Protocol Device",
-    "version": "", "serial": "", "location": "DDP: 192.168.3.84:4048",
+    "name": "WLED Mesa", "vendor": "", "description": "E1.31 Streaming ACN Device",
+    "version": "", "serial": "", "location": "E1.31: Unicast 192.168.3.84, Universe 1",
 }
+E131_DEVICES = [
+    {"name": "WLED Mesa", "ip": "192.168.3.84", "num_leds": 66, "start_universe": 1,
+     "start_channel": 1, "universe_size": 510, "keepalive_time": 0},
+]
 KEYBOARD = {
     "name": "Redragon K629", "vendor": "", "description": "Distributed Display Protocol Device",
     "version": "", "serial": "", "location": "DDP: 127.0.0.1:4049",
 }
 DDP_DEVICES = [
-    {"name": "WLED Mesa", "ip": "192.168.3.84", "port": 4048, "num_leds": 66},
     # teclado Redragon K629 via teclado-ponte (perifericos.sh): o quadro inteiro
     # do teclado, 21 colunas x 6 linhas, posicao = coluna*6 + linha
     {"name": "Redragon K629", "ip": "127.0.0.1", "port": 4049, "num_leds": 126},
@@ -123,7 +131,9 @@ BANDS = {"grave": GRAVE, "medio": MEDIO, "agudo": AGUDO, "tudo": range(16)}
 BAND_LABELS = {"grave": "Grave", "medio": "Médio", "agudo": "Agudo", "tudo": "Tudo"}
 
 # efeito -> (rotulo, grupo, parametros que a interface mostra)
-# Grupos: "audio" reage ao som, "tela" segue a tela, "ambiente" anima sozinho.
+# Grupos: "audio" reage ao som, "tela" segue a tela, "ambiente" anima sozinho,
+# "livre" o PC nao manda nada e o dispositivo fica com os efeitos dele (ex.: a
+# WLED recebendo audio do celular).
 CATALOG = {
     "vu": ("VU: enche com o som", "audio", ("band", "hue", "hue_spread")),
     "estrela": ("Estrela: cor girando, flash na batida", "audio", ("band",)),
@@ -140,6 +150,7 @@ CATALOG = {
     "cometa": ("Cometa", "ambiente", ("hue", "speed")),
     "estrelado": ("Céu estrelado", "ambiente", ("hue", "hue_spread")),
     "apagado": ("Apagado", "ambiente", ()),
+    "livre": ("Livre: efeitos do próprio dispositivo", "livre", ()),
 }
 # faixa de velocidade aceita por cada efeito do plugin (ele nao limita sozinho)
 SPEED_RANGE = {"RainbowWave": (1, 100), "SpectrumCycling": (1, 100), "Breathing": (10, 200),
@@ -281,6 +292,8 @@ def effects_for(cfg, skip=()):
         if zid in skip:
             continue
         zcfg = cfg["zones"][zid]
+        if zcfg.get("effect") == "livre":                # o PC nao manda nada para a zona
+            continue
         cls, custom, brightness = plugin_effect(zcfg)
         speed, colors = plugin_speed(cls, zcfg), palette(zcfg)
         key = (cls, json.dumps(custom, sort_keys=True), brightness, speed, tuple(colors))
@@ -319,6 +332,7 @@ def openrgb_json():
     for name in IGNORED_DETECTORS:
         det[name] = False
     d["DDPDevices"] = {"devices": DDP_DEVICES}
+    d["E131Devices"] = {"devices": E131_DEVICES}
     pm = d.setdefault("ProfileManager", {})
     pm["open_profile"] = {"enabled": True, "name": PROFILE}
     save(path, d)
@@ -477,6 +491,26 @@ def dota_profile_json(cfg=None):
     write_profile(PROFILE_DOTA, effects_for(cfg or user_config(), skip=GAME_ZONES))
 
 
+def release_wled(ips=None):
+    """Tira a WLED do modo realtime na hora ({"live": false} na API JSON), em
+    vez de esperar o tempo limite dela: volta sozinha aos proprios efeitos."""
+    import urllib.request
+    done = []
+    for ip in ips if ips is not None else [d["ip"] for d in E131_DEVICES]:
+        req = urllib.request.Request(f"http://{ip}/json/state", data=b'{"live":false}',
+                                     headers={"Content-Type": "application/json"}, method="POST")
+        try:
+            with urllib.request.urlopen(req, timeout=2):
+                done.append(ip)
+        except OSError:
+            pass                                         # WLED desligada/fora da rede
+    return done
+
+
+def off_profile_json():
+    write_profile(PROFILE_OFF, [])
+
+
 def apply(cfg):
     """Grava a configuracao, gera os perfis e recarrega o perfil ativo no
     OpenRGB (a mudanca aparece na hora). Bloqueia alguns segundos se houver
@@ -495,6 +529,9 @@ def apply(cfg):
         sdk.close()
     except OSError:
         return False                                     # OpenRGB fechado: vale na proxima abertura
+    if cfg["zones"].get("wled", {}).get("effect") == "livre" and active == PROFILE:
+        time.sleep(0.5)                                  # depois do ultimo quadro do OpenRGB
+        release_wled()
     if uses_screen(cfg):
         persist_screen_token(active)
     return True
@@ -506,4 +543,5 @@ if __name__ == "__main__":
     zones_json()
     profile_json()
     dota_profile_json()
+    off_profile_json()
     print("configuracao do OpenRGB gerada")
