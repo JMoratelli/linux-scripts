@@ -31,8 +31,23 @@ import time
 VID, PID = 0x258A, 0x0049
 LISTEN = ("127.0.0.1", 4049)
 LEDS = 126
-MAX_FPS = 40
+# O firmware do K629 cai do USB (a cada 4-6 min) se receber quadros em rajada
+# a ~40/s. O software oficial manda um a cada 37 ms, em ritmo regular; aqui
+# vai um a cada 50 ms, e quadro repetido nao e reenviado (o teclado guarda o
+# ultimo).
+FRAME_INTERVAL = 0.05
 IDLE = 1.5
+SLOW_SEND = 0.03             # envio acima disso vai para o log (teclado sobrecarregado?)
+
+# Posicoes do quadro que tem tecla (layout 75%: 85 de 126). O software oficial
+# nunca acende as outras; mandar cor nelas derruba o teclado do USB depois de
+# alguns minutos. A ponte zera essas posicoes em todo quadro.
+# (mesma lista de K629_KEYS no leds/rgb_config.py; um teste confere)
+KEY_POSITIONS = (0, 1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15, 16, 17, 18, 19, 20,
+                 21, 22, 24, 25, 26, 27, 28, 30, 31, 32, 33, 34, 35, 36, 37, 38, 39, 40,
+                 42, 43, 44, 45, 46, 48, 49, 50, 51, 52, 53, 54, 55, 56, 57, 58, 59, 60,
+                 61, 62, 63, 64, 65, 66, 67, 68, 69, 72, 73, 74, 75, 76, 78, 79, 81, 82,
+                 83, 84, 88, 89, 90, 91, 92, 93, 94, 95)
 
 
 def ioc(direction, nr, size):
@@ -51,6 +66,18 @@ def find_dev():
         if f"HID_ID=0003:{VID:08X}:{PID:08X}" in uevent and b"\x85\x08" in desc:
             return "/dev/" + os.path.basename(path)
     return None
+
+
+_KEYS = frozenset(KEY_POSITIONS)
+
+
+def mask(rgb):
+    """Zera a cor das posicoes sem tecla."""
+    out = bytearray(rgb)
+    for pos in range(LEDS):
+        if pos not in _KEYS:
+            out[pos * 3:pos * 3 + 3] = b"\0\0\0"
+    return out
 
 
 def load_redragon_led():
@@ -77,7 +104,9 @@ class Keyboard:
         if not self.streaming:
             self.refresh_config()
             self.streaming = True
+        t0 = time.monotonic()
         fcntl.ioctl(self.fd, self.req, bytearray(b"\x08\x0a\x7a\x01") + rgb)
+        return time.monotonic() - t0
 
     def stop(self):
         if self.streaming:
@@ -105,11 +134,15 @@ def run(kb):
     sock.bind(LISTEN)
 
     frame = bytearray(3 * LEDS)
-    dirty = False
-    last_rx = last_tx = 0.0
-    min_gap = 1.0 / MAX_FPS
+    sent = None                                  # ultimo quadro mandado ao teclado
+    pending = False                              # chegou pacote do OpenRGB ainda nao tratado
+    last_rx = last_tx = last_log = 0.0
+    slow = 0
     while True:
-        ready, _, _ = select.select([sock], [], [], 0.25)
+        wait = 0.25
+        if pending:                              # espera a proxima vaga do ritmo
+            wait = max(0.0, FRAME_INTERVAL - (time.monotonic() - last_tx))
+        ready, _, _ = select.select([sock], [], [], wait)
         now = time.monotonic()
         if ready:
             pkt = sock.recv(1500)
@@ -122,14 +155,24 @@ def run(kb):
                 end = min(len(frame), offset + len(data))
                 if offset < end:
                     frame[offset:end] = data[:end - offset]
-                    dirty = True
+                    pending = True
                 last_rx = now
         try:
-            if dirty and now - last_tx >= min_gap:
-                kb.send(frame)
-                dirty, last_tx = False, now
+            if pending and now - last_tx >= FRAME_INTERVAL:
+                pending = False
+                out = mask(frame)                    # so as 85 posicoes com tecla
+                if out == sent:                      # igual ao que o teclado ja mostra
+                    continue
+                took = kb.send(out)
+                sent, last_tx = out, now
+                if took and took > SLOW_SEND:
+                    slow += 1
+                    if now - last_log > 30:              # no maximo uma linha a cada 30 s
+                        print(f"teclado lento: envio de {took * 1000:.0f} ms ({slow} lentos)", flush=True)
+                        last_log = now
             elif kb.streaming and now - last_rx > IDLE:   # OpenRGB parou de mandar
                 kb.stop()
+                sent = None
         except OSError as e:                       # teclado desconectado
             sys.exit(f"teclado desconectado: {e}")
 

@@ -8,6 +8,10 @@
 2. Depois de abrir, confere pelo SDK o tamanho das zonas ARGB (fitas nao
    informam quantos LEDs tem) e corrige o que estiver diferente; o OpenRGB
    guarda o tamanho no Configuration.json.
+3. Vigia o OpenRGB: o Effects Plugin as vezes aborta ao trocar de perfil
+   (corrida entre a thread de um efeito e a desmontagem da captura de
+   audio). Se o OpenRGB morrer com erro, abre de novo; se fechar
+   normalmente (sair pela bandeja), respeita.
 """
 import ctypes
 import json
@@ -104,7 +108,10 @@ def fix_zone_sizes(timeout=90):
                 sdk.resize_zone(c.index, w["zone"], w["size"])
 
 
-if __name__ == "__main__":
+MAX_RESTARTS, RESTART_WINDOW, RESTART_DELAY = 5, 300, 3
+
+
+def run_once():
     fix_audio_device()
     proc = subprocess.Popen(["openrgb", "--startminimized", "--server"])
     try:
@@ -114,4 +121,24 @@ if __name__ == "__main__":
             rgb_config.persist_screen_token(rgb_config.PROFILE, delay=20)
     except Exception as e:                        # nunca derrubar o OpenRGB por isso
         log(f"falha ao conferir as zonas/token da tela: {e}")
-    sys.exit(proc.wait())
+    return proc.wait()
+
+
+def supervise(run=run_once, sleep=time.sleep, clock=time.monotonic):
+    """Reabre o OpenRGB se ele morrer com erro; desiste se cair demais."""
+    crashes = []
+    while True:
+        code = run()
+        if code == 0:                             # saiu normalmente
+            return 0
+        now = clock()
+        crashes = [t for t in crashes if now - t < RESTART_WINDOW] + [now]
+        if len(crashes) > MAX_RESTARTS:
+            log(f"OpenRGB caiu {len(crashes)} vezes em {RESTART_WINDOW // 60} min; parando de reabrir")
+            return code
+        log(f"OpenRGB terminou com codigo {code}; reabrindo em {RESTART_DELAY} s")
+        sleep(RESTART_DELAY)
+
+
+if __name__ == "__main__":
+    sys.exit(supervise())
