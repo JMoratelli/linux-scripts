@@ -231,6 +231,8 @@ udevadm control --reload
 udevadm trigger --subsystem-match=hidraw --action=add
 user_systemctl daemon-reload
 user_systemctl start fone-audio-auto.service
+# servicos ja rodando continuariam com o codigo antigo em memoria
+user_systemctl try-restart teclado-ponte.service fone-audio-auto.service
 "$LED_BIN" || echo "  (nenhum dispositivo Logitech ligado agora; os LEDs serao apagados ao conectar)"
 
 echo ""
