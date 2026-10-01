@@ -8,7 +8,7 @@
   - `FirstInstall.sh`: script principal, comum às duas máquinas. Pergunta a
     distro e se a máquina é pessoal ou corporativa, faz a instalação base
     (pacotes, extensões do VS Code, configurações do VS Code seguindo
-    github.com/JMoratelli/VSCode, clonado em ~/Projetos/VSCode, login do
+    github.com/JMoratelli/VSCode, clonado em ~/projetos/vscode, login do
     GitHub CLI) e no fim roda os
     `*.sh` de `comum/` e depois os de `pessoal/` ou `corporativo/`.
   - `comum/`: scripts para as duas máquinas.

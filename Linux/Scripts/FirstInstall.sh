@@ -72,11 +72,7 @@ VSCODE_EXTENSIONS=(
   ms-python.python
   ms-python.vscode-pylance
   ms-python.vscode-python-envs
-  ms-vscode.cmake-tools
-  ms-vscode.cpp-devtools
   ms-vscode.cpptools
-  ms-vscode.cpptools-extension-pack
-  ms-vscode.cpptools-themes
   ms-vscode.powershell
 )
 
@@ -375,16 +371,35 @@ run_debian() {
 }
 
 # ---------------------------------------------------------------------------
-# Repositorio de instrucoes do VS Code (github.com/JMoratelli/VSCode): clona
-# em ~/Projetos ou atualiza se ja existir, para a documentacao ficar na maquina.
+# Projetos ficam em ~/projetos, um diretorio por projeto, nome minusculo
+# (estrutura-padrao.md do repositorio VSCode). O xdg-user-dirs 0.19+ cria
+# sozinho um ~/Projetos traduzido no login se XDG_PROJECTS_DIR nao apontar
+# para uma pasta que existe -- por isso ela e fixada aqui.
 # ---------------------------------------------------------------------------
-PROJETOS_DIR="$HOME/Projetos"
+PROJETOS_DIR="$HOME/projetos"
 VSCODE_DOCS_REPO="https://github.com/JMoratelli/VSCode.git"
 
-sync_vscode_docs() {
-  echo "=== VS Code: instrucoes em $PROJETOS_DIR/VSCode ==="
-  local dest="$PROJETOS_DIR/VSCode"
+setup_projetos_dir() {
+  echo "=== Projetos em $PROJETOS_DIR ==="
   mkdir -p "$PROJETOS_DIR"
+  if command -v xdg-user-dirs-update >/dev/null 2>&1; then
+    xdg-user-dirs-update --set PROJECTS "$PROJETOS_DIR" 2>/dev/null || true
+  fi
+}
+
+# ---------------------------------------------------------------------------
+# Repositorio de instrucoes do VS Code (github.com/JMoratelli/VSCode): clona
+# em ~/projetos/vscode ou atualiza se ja existir, para a documentacao ficar na
+# maquina.
+# ---------------------------------------------------------------------------
+sync_vscode_docs() {
+  echo "=== VS Code: instrucoes em $PROJETOS_DIR/vscode ==="
+  local dest="$PROJETOS_DIR/vscode"
+  # clone de antes da padronizacao: muda de lugar em vez de clonar de novo
+  if [ ! -e "$dest" ] && [ -d "$HOME/Projetos/VSCode/.git" ]; then
+    mv "$HOME/Projetos/VSCode" "$dest"
+    rmdir "$HOME/Projetos" 2>/dev/null || true
+  fi
   if [ -d "$dest/.git" ]; then
     git -C "$dest" pull --ff-only -q || echo "  [aviso] nao consegui atualizar $dest"
   else
@@ -394,8 +409,8 @@ sync_vscode_docs() {
 
 # ---------------------------------------------------------------------------
 # VS Code: configuracoes de usuario seguindo github.com/JMoratelli/VSCode
-# (extensions.md, git-settings.md, editor-performance.md). Mescla no
-# settings.json existente, sem apagar o que ja estiver la.
+# (extensions.md, git-settings.md, editor-performance.md, claude-code.md).
+# Mescla no settings.json existente, sem apagar o que ja estiver la.
 # ---------------------------------------------------------------------------
 apply_vscode_settings() {
   echo "=== VS Code: configuracoes (github.com/JMoratelli/VSCode) ==="
@@ -406,11 +421,13 @@ import json, os, re, sys
 path = sys.argv[1]
 wanted = {
     "extensions.autoCheckUpdates": False,    # extensions.md
-    "extensions.autoUpdate": False,
+    "extensions.autoUpdate": "off",          # "on"/"off" desde o 1.139
     "git.autofetch": False,                  # git-settings.md
     "git.detectSubmodules": False,
     "editor.minimap.enabled": False,         # editor-performance.md
     "workbench.editor.enablePreview": True,
+    "workbench.startupEditor": "none",       # claude-code.md
+    "window.restoreWindows": "preserve",
 }
 try:
     text = open(path).read()
@@ -471,6 +488,7 @@ case "$DISTRO" in
   debian) run_debian ;;
 esac
 
+setup_projetos_dir
 sync_vscode_docs
 apply_vscode_settings
 setup_github_cli
