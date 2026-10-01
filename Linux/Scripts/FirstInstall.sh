@@ -409,7 +409,7 @@ sync_vscode_docs() {
 
 # ---------------------------------------------------------------------------
 # VS Code: configuracoes de usuario seguindo github.com/JMoratelli/VSCode
-# (extensions.md, git-settings.md, editor-performance.md, claude-code.md).
+# (extensions.md, git-settings.md, editor-performance.md).
 # Mescla no settings.json existente, sem apagar o que ja estiver la.
 # ---------------------------------------------------------------------------
 apply_vscode_settings() {
@@ -426,7 +426,7 @@ wanted = {
     "git.detectSubmodules": False,
     "editor.minimap.enabled": False,         # editor-performance.md
     "workbench.editor.enablePreview": True,
-    "workbench.startupEditor": "none",       # claude-code.md
+    "workbench.startupEditor": "none",
     "window.restoreWindows": "preserve",
 }
 try:
